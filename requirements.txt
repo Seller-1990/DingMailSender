@@ -1,0 +1,10 @@
+PySide6
+openpyxl
+jinja2
+markdown-it-py
+beautifulsoup4
+PyYAML
+
+# build
+pyinstaller
+
