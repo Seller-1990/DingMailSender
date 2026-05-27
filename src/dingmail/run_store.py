@@ -17,6 +17,21 @@ def _safe_name(name: str) -> str:
     return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name)
 
 
+def _create_unique_run_dir(base_dir: Path, run_name: str) -> Path:
+    suffix = 0
+    while True:
+        candidate_name = run_name if suffix == 0 else f"{run_name}_{suffix}"
+        run_dir = base_dir / candidate_name
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+            (run_dir / "previews").mkdir(exist_ok=False)
+            (run_dir / "eml").mkdir(exist_ok=False)
+            (run_dir / "logs").mkdir(exist_ok=False)
+            return run_dir
+        except FileExistsError:
+            suffix += 1
+
+
 @dataclass(frozen=True)
 class RunPaths:
     run_dir: Path
@@ -29,13 +44,10 @@ class RunPaths:
 def create_run_paths(*, home_dir: Path | None, campaign_dir: Path) -> RunPaths:
     home = ensure_layout(home_dir)
     campaign_name = _safe_name(campaign_dir.name)
-    run_dir = runs_dir(home) / f"{_now_stamp()}_{campaign_name}"
+    run_dir = _create_unique_run_dir(runs_dir(home), f"{_now_stamp()}_{campaign_name}")
     previews_dir = run_dir / "previews"
     eml_dir = run_dir / "eml"
     logs_dir = run_dir / "logs"
-    previews_dir.mkdir(parents=True, exist_ok=False)
-    eml_dir.mkdir(parents=True, exist_ok=False)
-    logs_dir.mkdir(parents=True, exist_ok=False)
 
     manifest_csv = run_dir / "manifest.csv"
     with manifest_csv.open("w", encoding="utf-8", newline="") as f:

@@ -1,9 +1,64 @@
 from __future__ import annotations
 
+import base64
 import imaplib
 import re
 import time
 from email.message import EmailMessage
+
+
+def _decode_imap_utf7(value: str) -> str:
+    parts: list[str] = []
+    index = 0
+    while index < len(value):
+        if value[index] != "&":
+            parts.append(value[index])
+            index += 1
+            continue
+
+        end = value.find("-", index)
+        if end < 0:
+            parts.append(value[index:])
+            break
+
+        token = value[index + 1 : end]
+        if not token:
+            parts.append("&")
+        else:
+            payload = token.replace(",", "/")
+            padding = "=" * ((4 - (len(payload) % 4)) % 4)
+            decoded = base64.b64decode(payload + padding)
+            parts.append(decoded.decode("utf-16-be"))
+        index = end + 1
+
+    return "".join(parts)
+
+
+def _encode_imap_utf7(value: str) -> str:
+    parts: list[str] = []
+    buffer: list[str] = []
+
+    def _flush_buffer() -> None:
+        if not buffer:
+            return
+        payload = "".join(buffer).encode("utf-16-be")
+        encoded = base64.b64encode(payload).decode("ascii").rstrip("=").replace("/", ",")
+        parts.append(f"&{encoded}-")
+        buffer.clear()
+
+    for char in value:
+        if char == "&":
+            _flush_buffer()
+            parts.append("&-")
+            continue
+        if 0x20 <= ord(char) <= 0x7E:
+            _flush_buffer()
+            parts.append(char)
+            continue
+        buffer.append(char)
+
+    _flush_buffer()
+    return "".join(parts)
 
 
 class ImapDraftsSession:
@@ -53,7 +108,7 @@ class ImapDraftsSession:
         if status != "OK" or not boxes:
             return None
 
-        parsed_names: list[tuple[str, str]] = []
+        parsed_names: list[tuple[str, str, str]] = []
         for raw in boxes:
             if not raw:
                 continue
@@ -61,13 +116,17 @@ class ImapDraftsSession:
             name = self._extract_mailbox_name(line)
             if not name:
                 continue
-            parsed_names.append((line.lower(), name))
+            try:
+                decoded_name = _decode_imap_utf7(name)
+            except Exception:
+                decoded_name = name
+            parsed_names.append((line.lower(), name, decoded_name.lower()))
 
-        for line, name in parsed_names:
+        for line, name, _decoded_name in parsed_names:
             if "\\drafts" in line:
                 return name
-        for line, name in parsed_names:
-            if "draft" in line or "草稿" in line:
+        for line, name, decoded_name in parsed_names:
+            if "draft" in line or "draft" in decoded_name or "草稿" in decoded_name:
                 return name
         return None
 
@@ -77,9 +136,10 @@ class ImapDraftsSession:
 
         candidates = ["Drafts", "草稿箱", "INBOX.Drafts", "INBOX/草稿箱", "INBOX/草稿"]
         for mailbox in candidates:
-            status, _ = self._imap.select(mailbox, readonly=True)
+            encoded_mailbox = _encode_imap_utf7(mailbox)
+            status, _ = self._imap.select(encoded_mailbox, readonly=True)
             if status == "OK":
-                return mailbox
+                return encoded_mailbox
 
         status, _ = self._imap.create("Drafts")
         if status == "OK":
