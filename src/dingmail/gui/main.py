@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import re
 import traceback
 import uuid
@@ -10,9 +9,10 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..connection_profile import load_connection_profile, save_connection_profile
 from ..constants import DEFAULT_IMAP_HOST, DEFAULT_IMAP_PORT_SSL
 from ..model import SmtpConfig
-from ..paths import detect_home_dir, ensure_layout, packages_dir, runs_dir
+from ..paths import connection_profile_path, detect_home_dir, ensure_layout, packages_dir, runs_dir
 from ..smtp_sender import SmtpSession
 from ..task_delivery import SendTasksResult, save_tasks_to_imap_drafts, send_tasks
 from ..task_models import MailTask
@@ -21,11 +21,14 @@ from ..task_package import (
     TASKS_FILENAME,
     clone_task,
     create_template_package,
+    ensure_unique_task_ids,
     load_tasks_from_package,
     package_relpath,
+    resolve_user_path,
     save_tasks_to_package,
 )
-from ..task_service import render_task_email, validate_task
+from ..task_service import render_task_preview_html, validate_task
+from .task_runtime import TaskRuntimeController
 
 EMAIL_RE = re.compile(r"^[^@\s;]+@[^@\s]+\.[^@\s]+$")
 SCHEDULE_CHECK_INTERVAL_MS = 15_000
@@ -106,6 +109,11 @@ def _now_stamp() -> str:
 def _split_email_input(text: str) -> list[str]:
     raw = str(text or "").replace("；", ";").replace(",", ";")
     return [item.strip() for item in raw.split(";") if item.strip()]
+
+
+def _error_summary(text: str) -> str:
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    return lines[-1] if lines else "未知错误"
 
 
 class TestSmtpWorker(QtCore.QThread):
@@ -328,7 +336,10 @@ class TaskEditorDialog(QtWidgets.QDialog):
             "Markdown (*.md *.markdown);;所有文件 (*.*)",
         )
         if file_path:
-            self._markdown_input.setText(self._normalize_path(file_path))
+            try:
+                self._markdown_input.setText(self._normalize_path(file_path))
+            except ValueError as exc:
+                QtWidgets.QMessageBox.warning(self, "路径超出任务包", str(exc))
 
     def _add_attachments(self) -> None:
         start_dir = self._package_dir / "attachments"
@@ -339,7 +350,11 @@ class TaskEditorDialog(QtWidgets.QDialog):
             "所有文件 (*.*)",
         )
         for file_path in file_paths:
-            normalized = self._normalize_path(file_path)
+            try:
+                normalized = self._normalize_path(file_path)
+            except ValueError as exc:
+                QtWidgets.QMessageBox.warning(self, "路径超出任务包", str(exc))
+                continue
             if normalized and not self._attachments_list.findItems(normalized, QtCore.Qt.MatchExactly):
                 self._attachments_list.addItem(normalized)
 
@@ -446,13 +461,14 @@ class PreviewDialog(QtWidgets.QDialog):
             f"定时发送：{'是' if task.schedule_enabled else '否'} / {scheduled_text}\n"
             f"备注：{task.note or '无'}"
         )
-        self._issue.clear()
+        issues = validate_task(task, self._package_dir)
+        self._issue.setText("\n".join(issues) if issues else "")
         try:
-            rendered = render_task_email(task, self._package_dir)
-            self._browser.setHtml(rendered.html_for_preview)
+            self._browser.setHtml(render_task_preview_html(task, self._package_dir))
         except Exception as exc:
             self._browser.setHtml("")
-            self._issue.setText(f"预览失败：{exc}")
+            prefix = f"{self._issue.text()}\n" if self._issue.text() else ""
+            self._issue.setText(f"{prefix}预览失败：{exc}".strip())
 
         self._prev_btn.setEnabled(self._index > 0)
         self._next_btn.setEnabled(self._index < len(self._tasks) - 1)
@@ -465,15 +481,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1420, 880)
 
         self._home_dir = ensure_layout(detect_home_dir())
-        self._conn_config_path = self._home_dir / "conn_profile.json"
+        self._conn_config_path = connection_profile_path()
+        self._legacy_conn_config_path = self._home_dir / "conn_profile.json"
         self._smtp_cfg = SmtpConfig()
         self._smtp_password = ""
         self._smtp_connected = False
         self._package_dir: Path | None = None
         self._tasks: list[MailTask] = []
-        self._queued_task_ids: set[str] = set()
-        self._sending_task_ids: set[str] = set()
-        self._drafting_task_ids: set[str] = set()
+        self._runtime = TaskRuntimeController()
         self._last_run_dir: Path | None = None
         self._quit_requested = False
         self._close_tip_shown = False
@@ -493,16 +508,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_ui_state()
 
     def _load_connection_profile(self) -> None:
-        if not self._conn_config_path.is_file():
-            return
-        try:
-            raw = json.loads(self._conn_config_path.read_text(encoding="utf-8"))
-        except Exception:
-            return
-        if not isinstance(raw, dict):
-            return
-
-        from_email = str(raw.get("from_email") or "").strip()
+        profile = load_connection_profile(self._conn_config_path, self._legacy_conn_config_path)
+        from_email = profile.from_email
         if from_email:
             self._smtp_cfg = SmtpConfig(
                 host=self._smtp_cfg.host,
@@ -510,14 +517,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 security=self._smtp_cfg.security,
                 username=from_email,
             )
+        self._smtp_password = profile.smtp_password
 
-    def _save_connection_profile(self, *, from_email: str) -> None:
-        payload = {
-            "from_email": from_email,
-        }
-        self._conn_config_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+    def _save_connection_profile(self, *, from_email: str, smtp_password: str) -> Path:
+        return save_connection_profile(
+            self._conn_config_path,
+            self._legacy_conn_config_path,
+            from_email=from_email,
+            smtp_password=smtp_password,
         )
 
     def _refresh_smtp_summary_labels(self) -> None:
@@ -526,6 +533,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._server_label.setText(
             f"发信服务器：{self._smtp_cfg.host}:{self._smtp_cfg.port} / {self._smtp_cfg.security.upper()}"
         )
+
+    def _show_error_dialog(self, title: str, message: str, *, details: str | None = None) -> None:
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Critical)
+        box.setWindowTitle(title)
+        box.setText(message)
+        if details:
+            box.setDetailedText(details)
+        box.exec()
 
     def _build_ui(self) -> None:
         root = QtWidgets.QWidget()
@@ -555,7 +571,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._from_email_input.textChanged.connect(self._on_from_email_changed)
         self._smtp_password_input = QtWidgets.QLineEdit(self._smtp_password)
         self._smtp_password_input.setEchoMode(QtWidgets.QLineEdit.Password)
-        self._smtp_password_input.setPlaceholderText("首次使用请填写 SMTP 授权码（仅本次运行使用）")
+        self._smtp_password_input.setPlaceholderText("首次使用请填写 SMTP 授权码（连接成功后会自动保存）")
         self._smtp_password_input.textChanged.connect(self._on_password_changed)
         self._connect_btn = QtWidgets.QPushButton("连接并测试")
         self._connect_btn.clicked.connect(self._connect_smtp)
@@ -565,7 +581,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self,
                 "连接说明",
                 "请先填写发件邮箱和 SMTP 授权码。\n"
-                "程序只会保存发件邮箱；授权码不会写入磁盘。\n"
+                f"连接成功后会优先在程序目录保存 `{self._conn_config_path.name}`，不可写时会回退到工作目录。\n"
+                "Windows 下授权码会以系统 DPAPI 方式加密保存。\n"
                 "默认发信服务器：smtp.qiye.aliyun.com:465（SSL）。",
             )
         )
@@ -656,9 +673,9 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.addStretch(1)
 
         self._task_table = QtWidgets.QTableWidget()
-        self._task_table.setColumnCount(10)
+        self._task_table.setColumnCount(11)
         self._task_table.setHorizontalHeaderLabels(
-            ["启用", "收件人", "抄送", "主题", "开头/补充内容", "Markdown", "附件", "定时", "发送时间", "状态"]
+            ["启用", "收件人", "抄送", "主题", "开头/补充内容", "Markdown", "附件", "定时", "发送时间", "状态", "说明"]
         )
         self._task_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self._task_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
@@ -668,8 +685,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._task_table.itemSelectionChanged.connect(self._refresh_ui_state)
         self._task_table.itemDoubleClicked.connect(lambda _item: self._edit_selected_task())
         header = self._task_table.horizontalHeader()
-        header.setStretchLastSection(True)
-        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        for col in (0, 6, 7, 8, 9):
+            header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeToContents)
+        for col in (1, 2, 3, 4, 5, 10):
+            header.setSectionResizeMode(col, QtWidgets.QHeaderView.Stretch)
         self._task_table.setToolTip("双击行可编辑；状态为红色时先修正路径、邮箱或时间。")
 
         task_layout.addLayout(toolbar)
@@ -808,11 +829,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.activateWindow()
 
     def _exit_from_tray(self) -> None:
-        if self._queued_task_ids:
+        if self._runtime.queued_task_ids:
             reply = QtWidgets.QMessageBox.question(
                 self,
                 "确认退出",
-                f"当前还有 {len(self._queued_task_ids)} 个定时任务未发送。退出后将不再自动发送，确认继续吗？",
+                f"当前还有 {len(self._runtime.queued_task_ids)} 个定时任务未发送。退出后将不再自动发送，确认继续吗？",
             )
             if reply != QtWidgets.QMessageBox.Yes:
                 return
@@ -824,7 +845,7 @@ class MainWindow(QtWidgets.QMainWindow):
             event.accept()
             return
 
-        if not self._queued_task_ids and not self._smtp_connected:
+        if not self._runtime.queued_task_ids and not self._smtp_connected:
             event.accept()
             return
 
@@ -900,17 +921,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._smtp_worker = worker
 
         def _ok(info: str) -> None:
+            self._smtp_worker = None
             self._smtp_password = password
-            self._save_connection_profile(from_email=from_email)
             self._connect_btn.setEnabled(True)
             self._set_smtp_status(True, info)
-            QtWidgets.QMessageBox.information(self, "连接成功", f"SMTP 连接成功：{info}")
+            location_note = ""
+            save_warning = ""
+            try:
+                saved_path = self._save_connection_profile(from_email=from_email, smtp_password=password)
+                location_note = f"\n已保存登录信息：{saved_path}"
+            except Exception as exc:
+                save_warning = (
+                    f"\n\n连接信息未能写入 `{self._conn_config_path}` 或 `{self._legacy_conn_config_path}`：{exc}\n"
+                    "本次连接可继续使用，但下次启动可能仍需重新填写。"
+                )
+            QtWidgets.QMessageBox.information(self, "连接成功", f"SMTP 连接成功：{info}{location_note}{save_warning}")
 
         def _err(tb: str) -> None:
+            self._smtp_worker = None
             self._smtp_password = ""
             self._connect_btn.setEnabled(True)
             self._set_smtp_status(False, "连接失败")
-            QtWidgets.QMessageBox.critical(self, "连接失败", tb)
+            self._show_error_dialog("连接失败", f"SMTP 连接失败：{_error_summary(tb)}", details=tb)
 
         worker.finished_ok.connect(_ok)
         worker.finished_err.connect(_err)
@@ -961,7 +993,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ensure_within_home(package_dir)
             self._load_package(package_dir)
         except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "导入失败", str(exc))
+            self._show_error_dialog("导入失败", f"导入任务包失败：{exc}")
 
     def _reload_package(self) -> None:
         if not self._package_dir:
@@ -970,19 +1002,25 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self._load_package(self._package_dir)
         except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "重新加载失败", str(exc))
+            self._show_error_dialog("重新加载失败", f"重新加载任务包失败：{exc}")
 
     def _load_package(self, package_dir: Path) -> None:
         tasks = load_tasks_from_package(package_dir)
+        repairs = ensure_unique_task_ids(tasks)
+        repair_notice = ""
+        if repairs:
+            try:
+                save_tasks_to_package(package_dir, tasks)
+                repair_notice = "\n".join(repairs[:10]) + "\n\n任务表中的重复/缺失任务ID已自动修复并写回 tasks.xlsx。"
+            except Exception as exc:
+                repair_notice = "\n".join(repairs[:10]) + f"\n\n任务ID已在内存中修复，但写回 tasks.xlsx 失败：{exc}"
         self._package_dir = package_dir
         self._tasks = tasks
-        self._queued_task_ids.clear()
-        self._sending_task_ids.clear()
-        self._drafting_task_ids.clear()
-        for task in self._tasks:
-            self._reset_runtime_fields(task)
+        self._runtime.reset_loaded_tasks(package_dir, self._tasks)
         self._refresh_task_table()
         self._refresh_ui_state()
+        if repair_notice:
+            QtWidgets.QMessageBox.warning(self, "任务ID已自动修复", repair_notice)
 
     def _open_path(self, path: Path) -> None:
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
@@ -1022,18 +1060,15 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             save_tasks_to_package(self._package_dir, updated_tasks)
         except Exception as exc:
-            QtWidgets.QMessageBox.critical(
-                self,
+            self._show_error_dialog(
                 "保存失败",
                 f"写入 tasks.xlsx 失败：{exc}\n如果 Excel 正在打开，请先关闭 Excel 后重试。",
             )
             return False
 
         self._tasks = updated_tasks
-        valid_ids = {task.task_id for task in self._tasks}
-        self._queued_task_ids.intersection_update(valid_ids)
-        self._sending_task_ids.intersection_update(valid_ids)
-        self._drafting_task_ids.intersection_update(valid_ids)
+        self._runtime.invalidate_validation_cache()
+        self._runtime.sync_task_ids(self._tasks)
         self._refresh_task_table()
         self._refresh_ui_state()
         return True
@@ -1066,7 +1101,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         new_task = dialog.task()
-        self._reset_runtime_fields(new_task)
+        self._runtime.reset_runtime_fields(new_task)
         updated = copy.deepcopy(self._tasks)
         updated.append(new_task)
         if self._persist_tasks(updated_tasks=updated):
@@ -1082,7 +1117,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         updated_task = dialog.task()
-        self._reset_runtime_fields(updated_task)
+        self._runtime.reset_runtime_fields(updated_task)
         updated = copy.deepcopy(self._tasks)
         updated[row] = updated_task
         if self._persist_tasks(updated_tasks=updated):
@@ -1100,7 +1135,7 @@ class MainWindow(QtWidgets.QMainWindow):
         clones = []
         for row in rows:
             cloned = clone_task(updated[row])
-            self._reset_runtime_fields(cloned)
+            self._runtime.reset_runtime_fields(cloned)
             clones.append(cloned)
         for offset, task in enumerate(clones):
             updated.insert(insert_at + offset, task)
@@ -1135,87 +1170,58 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_task_table()
         self._refresh_ui_state()
 
-    def _validate_task(self, task: MailTask, *, check_schedule_time: bool) -> list[str]:
-        if not self._package_dir:
-            return ["未导入任务包"]
-        errors = validate_task(task, self._package_dir, now=datetime.now() if check_schedule_time else None)
-        invalid_to = [email for email in task.to_recipients if not EMAIL_RE.match(email)]
-        invalid_cc = [email for email in task.cc_recipients if not EMAIL_RE.match(email)]
-        if invalid_to:
-            errors.append(f"收件人邮箱格式不合法：{'; '.join(invalid_to)}")
-        if invalid_cc:
-            errors.append(f"抄送邮箱格式不合法：{'; '.join(invalid_cc)}")
-        return errors
-
-    def _reset_runtime_fields(self, task: MailTask) -> None:
-        task.status = "未校验"
-        task.error_message = ""
-        task.last_send_result = ""
-
-    def _refresh_runtime_state(self) -> None:
-        if not self._package_dir:
-            return
-        for task in self._tasks:
-            if not task.enabled:
-                task.status = "已停用"
-                task.error_message = ""
-                continue
-            errors = self._validate_task(task, check_schedule_time=False)
-            if errors:
-                task.status = "校验失败"
-                task.error_message = "\n".join(errors)
-                continue
-            if task.task_id in self._sending_task_ids:
-                task.status = "发送中"
-                continue
-            if task.task_id in self._drafting_task_ids:
-                task.status = "草稿保存中"
-                continue
-            if task.task_id in self._queued_task_ids and task.schedule_enabled:
-                task.status = "已加入定时队列"
-                task.error_message = ""
-                continue
-            if task.status in {"发送成功", "发送失败", "草稿已保存", "草稿保存失败"}:
-                continue
-            task.status = "可发送"
-            task.error_message = ""
-
     def _refresh_task_table(self) -> None:
-        self._refresh_runtime_state()
+        self._runtime.refresh_runtime_state(self._tasks)
+        self._task_table.setUpdatesEnabled(False)
         self._task_table.setRowCount(len(self._tasks))
-        for row, task in enumerate(self._tasks):
-            values = [
-                "是" if task.enabled else "否",
-                "; ".join(task.to_recipients),
-                "; ".join(task.cc_recipients),
-                task.subject,
-                _fit(task.intro_text, 24),
-                task.markdown_path,
-                f"{task.attachment_count()} 个附件" if task.attachment_count() else "无",
-                "是" if task.schedule_enabled else "否",
-                task.scheduled_at.strftime("%Y-%m-%d %H:%M:%S") if task.scheduled_at else "",
-                task.status,
-            ]
-            tooltip = "\n".join(
-                x
-                for x in [
-                    f"任务ID：{task.task_id}",
-                    f"备注：{task.note}" if task.note else "",
-                    f"最近结果：{task.last_send_result}" if task.last_send_result else "",
-                    f"说明：{task.error_message}" if task.error_message else "",
+        try:
+            for row, task in enumerate(self._tasks):
+                attachment_count = task.attachment_count()
+                issue_text = task.error_message or task.last_send_result or task.note
+                values = [
+                    "是" if task.enabled else "否",
+                    "; ".join(task.to_recipients),
+                    "; ".join(task.cc_recipients),
+                    task.subject,
+                    _fit(task.intro_text, 24),
+                    task.markdown_path,
+                    f"{attachment_count} 个附件" if attachment_count else "无",
+                    "是" if task.schedule_enabled else "否",
+                    task.scheduled_at.strftime("%Y-%m-%d %H:%M:%S") if task.scheduled_at else "",
+                    task.status,
+                    _fit(issue_text, 40),
                 ]
-                if x
-            )
-            for col, value in enumerate(values):
-                item = QtWidgets.QTableWidgetItem(value)
-                item.setToolTip(tooltip)
-                if col == 0:
-                    item.setTextAlignment(QtCore.Qt.AlignCenter)
-                if col == 9:
-                    color = STATUS_COLORS.get(task.status)
-                    if color:
-                        item.setBackground(QtGui.QColor(color))
-                self._task_table.setItem(row, col, item)
+                tooltip = "\n".join(
+                    x
+                    for x in [
+                        f"任务ID：{task.task_id}",
+                        f"备注：{task.note}" if task.note else "",
+                        f"最近结果：{task.last_send_result}" if task.last_send_result else "",
+                        f"说明：{task.error_message}" if task.error_message else "",
+                    ]
+                    if x
+                )
+                for col, value in enumerate(values):
+                    item = self._task_table.item(row, col)
+                    if item is None:
+                        item = QtWidgets.QTableWidgetItem()
+                        self._task_table.setItem(row, col, item)
+                    item.setText(value)
+                    item.setToolTip(tooltip)
+                    if col == 0:
+                        item.setTextAlignment(QtCore.Qt.AlignCenter)
+                    else:
+                        item.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+                    if col == 9:
+                        color = STATUS_COLORS.get(task.status)
+                        if color:
+                            item.setBackground(QtGui.QColor(color))
+                        else:
+                            item.setBackground(QtGui.QBrush())
+                    else:
+                        item.setBackground(QtGui.QBrush())
+        finally:
+            self._task_table.setUpdatesEnabled(True)
 
     def _refresh_ui_state(self) -> None:
         selected_count = len(self._selected_rows())
@@ -1249,7 +1255,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         enabled_tasks = [task for task in self._tasks if task.enabled]
         ready = sum(1 for task in self._tasks if task.status == "可发送")
-        queued = len(self._queued_task_ids)
+        queued = len(self._runtime.queued_task_ids)
         failed = sum(1 for task in self._tasks if task.status == "发送失败")
         selected_desc = f"当前选中：{selected_count} 条" if has_selection else "当前未选中任务"
         last_run = str(self._last_run_dir) if self._last_run_dir else "暂无"
@@ -1270,7 +1276,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "没有可发送任务", "请先选择或准备好可发送的任务。")
             return
 
-        self._sending_task_ids.update({task.task_id for task in tasks})
+        self._runtime.mark_sending(tasks)
         self._refresh_task_table()
         self._refresh_ui_state()
 
@@ -1298,16 +1304,10 @@ class MainWindow(QtWidgets.QMainWindow):
         def _err(tb: str) -> None:
             self._send_worker = None
             error_text = tb.strip()
-            for task in self._tasks:
-                if task.task_id in self._sending_task_ids:
-                    task.status = "发送失败"
-                    task.error_message = error_text
-                    task.last_send_result = "发送失败"
-                    self._queued_task_ids.discard(task.task_id)
-            self._sending_task_ids.clear()
+            self._runtime.mark_send_worker_error(self._tasks, error_text)
             self._refresh_task_table()
             self._refresh_ui_state()
-            QtWidgets.QMessageBox.critical(self, "发送失败", tb)
+            self._show_error_dialog("发送失败", f"发送任务失败：{_error_summary(tb)}", details=tb)
 
         worker.finished_ok.connect(_ok)
         worker.finished_err.connect(_err)
@@ -1323,7 +1323,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "没有可保存任务", "请先选择或准备好可保存的任务。")
             return
 
-        self._drafting_task_ids.update({task.task_id for task in tasks})
+        self._runtime.mark_drafting(tasks)
         self._refresh_task_table()
         self._refresh_ui_state()
 
@@ -1344,15 +1344,10 @@ class MainWindow(QtWidgets.QMainWindow):
         def _err(tb: str) -> None:
             self._draft_worker = None
             error_text = tb.strip()
-            for task in self._tasks:
-                if task.task_id in self._drafting_task_ids:
-                    task.status = "草稿保存失败"
-                    task.error_message = error_text
-                    task.last_send_result = "草稿保存失败"
-            self._drafting_task_ids.clear()
+            self._runtime.mark_draft_worker_error(self._tasks, error_text)
             self._refresh_task_table()
             self._refresh_ui_state()
-            QtWidgets.QMessageBox.critical(self, "保存草稿失败", tb)
+            self._show_error_dialog("保存草稿失败", f"保存草稿失败：{_error_summary(tb)}", details=tb)
 
         worker.finished_ok.connect(_ok)
         worker.finished_err.connect(_err)
@@ -1360,25 +1355,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_send_result(self, result: SendTasksResult) -> None:
         self._last_run_dir = result.run_paths.run_dir
-        outcome_map = {outcome.task_id: outcome for outcome in result.outcomes}
-        for task in self._tasks:
-            outcome = outcome_map.get(task.task_id)
-            if outcome is None:
-                continue
-            self._sending_task_ids.discard(task.task_id)
-            self._queued_task_ids.discard(task.task_id)
-            if outcome.status == "sent":
-                task.status = "发送成功"
-                task.error_message = ""
-                task.last_send_result = f"发送成功 {outcome.message_id or ''}".strip()
-            else:
-                task.status = "发送失败"
-                task.error_message = outcome.error or "未知错误"
-                task.last_send_result = "发送失败"
+        sent_count, failed_count = self._runtime.apply_send_result(self._tasks, result)
         self._refresh_task_table()
         self._refresh_ui_state()
-        sent_count = sum(1 for x in result.outcomes if x.status == "sent")
-        failed_count = len(result.outcomes) - sent_count
         QtWidgets.QMessageBox.information(
             self,
             "发送完成",
@@ -1387,24 +1366,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_draft_result(self, result: SendTasksResult) -> None:
         self._last_run_dir = result.run_paths.run_dir
-        outcome_map = {outcome.task_id: outcome for outcome in result.outcomes}
-        for task in self._tasks:
-            outcome = outcome_map.get(task.task_id)
-            if outcome is None:
-                continue
-            self._drafting_task_ids.discard(task.task_id)
-            if outcome.status == "draft_saved":
-                task.status = "草稿已保存"
-                task.error_message = ""
-                task.last_send_result = f"草稿已保存 {outcome.message_id or ''}".strip()
-            else:
-                task.status = "草稿保存失败"
-                task.error_message = outcome.error or "未知错误"
-                task.last_send_result = "草稿保存失败"
+        ok_count, fail_count = self._runtime.apply_draft_result(self._tasks, result)
         self._refresh_task_table()
         self._refresh_ui_state()
-        ok_count = sum(1 for x in result.outcomes if x.status == "draft_saved")
-        fail_count = len(result.outcomes) - ok_count
         QtWidgets.QMessageBox.information(
             self,
             "保存草稿完成",
@@ -1420,15 +1384,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "未选择任务", "请先选择至少一条任务。")
             return
 
-        valid: list[MailTask] = []
-        blocked: list[str] = []
-        for task in tasks:
-            errors = self._validate_task(task, check_schedule_time=False)
-            if errors:
-                blocked.append(f"{task.subject or task.task_id}：{'；'.join(errors)}")
-            else:
-                valid.append(task)
-
+        valid, blocked = self._runtime.partition_valid_tasks(tasks, check_schedule_time=False)
         if blocked:
             QtWidgets.QMessageBox.warning(self, "存在不可保存任务", "\n\n".join(blocked[:10]))
         if not valid:
@@ -1453,15 +1409,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "未选择任务", "请先选择至少一条任务。")
             return
 
-        valid: list[MailTask] = []
-        blocked: list[str] = []
-        for task in tasks:
-            errors = self._validate_task(task, check_schedule_time=False)
-            if errors:
-                blocked.append(f"{task.subject or task.task_id}：{'；'.join(errors)}")
-            else:
-                valid.append(task)
-
+        valid, blocked = self._runtime.partition_valid_tasks(tasks, check_schedule_time=False)
         if blocked:
             QtWidgets.QMessageBox.warning(self, "存在不可发送任务", "\n\n".join(blocked[:10]))
         if not valid:
@@ -1486,20 +1434,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "未选择任务", "请先选择至少一条任务。")
             return
 
-        errors: list[str] = []
-        queued = 0
-        for task in tasks:
-            if not task.schedule_enabled:
-                errors.append(f"{task.subject or task.task_id}：未勾选定时发送")
-                continue
-            task_errors = self._validate_task(task, check_schedule_time=True)
-            if task_errors:
-                errors.append(f"{task.subject or task.task_id}：{'；'.join(task_errors)}")
-                continue
-            self._queued_task_ids.add(task.task_id)
-            task.status = "已加入定时队列"
-            task.error_message = ""
-            queued += 1
+        queued, errors = self._runtime.queue_scheduled_tasks(tasks)
 
         self._refresh_task_table()
         self._refresh_ui_state()
@@ -1514,14 +1449,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "无需重试", "当前没有可重试的失败任务。")
             return
 
-        blocked: list[str] = []
-        valid: list[MailTask] = []
-        for task in failed:
-            errors = self._validate_task(task, check_schedule_time=False)
-            if errors:
-                blocked.append(f"{task.subject or task.task_id}：{'；'.join(errors)}")
-            else:
-                valid.append(task)
+        valid, blocked = self._runtime.partition_valid_tasks(failed, check_schedule_time=False)
         if blocked:
             QtWidgets.QMessageBox.warning(self, "部分失败任务仍不可发送", "\n".join(blocked[:10]))
         if not valid:
@@ -1531,27 +1459,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _process_scheduled_tasks(self) -> None:
         if not self._smtp_connected or self._send_worker is not None or self._draft_worker is not None or not self._package_dir:
             return
-        now = datetime.now()
-        due_tasks: list[MailTask] = []
-        for task in self._tasks:
-            if task.task_id not in self._queued_task_ids:
-                continue
-            if not task.schedule_enabled or task.scheduled_at is None:
-                task.status = "发送失败"
-                task.error_message = "任务已在定时队列中，但缺少合法发送时间"
-                task.last_send_result = "发送失败"
-                self._queued_task_ids.discard(task.task_id)
-                continue
-            if task.scheduled_at > now:
-                continue
-            errors = self._validate_task(task, check_schedule_time=False)
-            if errors:
-                task.status = "发送失败"
-                task.error_message = "\n".join(errors)
-                task.last_send_result = "发送失败"
-                self._queued_task_ids.discard(task.task_id)
-                continue
-            due_tasks.append(task)
+        due_tasks = self._runtime.collect_due_tasks(self._tasks, now=datetime.now())
 
         if due_tasks:
             self._start_send(due_tasks, queue_mode=True)

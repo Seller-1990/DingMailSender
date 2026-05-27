@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 import re
 
-from .email_builder import Attachment, attachment_from_path, build_email_message
+from .email_builder import Attachment, attachment_from_path
 from .rendering import InlineImage, embed_cid_images, markdown_to_html, rewrite_local_images_for_preview, wrap_email_html
 from .task_models import MailTask
 from .task_package import resolve_user_path
@@ -66,22 +66,32 @@ def _resolve_attachments(task: MailTask, package_dir: Path) -> list[Attachment]:
     return attachments
 
 
-def compose_task_markdown(task: MailTask, package_dir: Path) -> str:
-    markdown_body, _ = _read_markdown_file(task, package_dir)
-    intro = (task.intro_text or "").strip()
-    body = _strip_leading_markdown_title(markdown_body)
-    if intro and body:
-        return f"{intro}\n\n{body}"
-    if intro:
-        return intro
-    return body
-
-
-def render_task_email(task: MailTask, package_dir: Path) -> RenderedTaskEmail:
+def _compose_markdown_parts(task: MailTask, package_dir: Path) -> tuple[str, Path]:
     markdown_body, markdown_parent = _read_markdown_file(task, package_dir)
     intro = (task.intro_text or "").strip()
     body = _strip_leading_markdown_title(markdown_body)
-    composed_markdown = f"{intro}\n\n{body}".strip() if intro else body
+    if intro and body:
+        return f"{intro}\n\n{body}", markdown_parent
+    if intro:
+        return intro, markdown_parent
+    return body, markdown_parent
+
+
+def compose_task_markdown(task: MailTask, package_dir: Path) -> str:
+    composed_markdown, _ = _compose_markdown_parts(task, package_dir)
+    return composed_markdown
+
+
+def render_task_preview_html(task: MailTask, package_dir: Path) -> str:
+    composed_markdown, markdown_parent = _compose_markdown_parts(task, package_dir)
+    if not composed_markdown:
+        raise ValueError("邮件正文为空")
+    html = wrap_email_html(markdown_to_html(composed_markdown))
+    return rewrite_local_images_for_preview(html, markdown_parent)
+
+
+def render_task_email(task: MailTask, package_dir: Path) -> RenderedTaskEmail:
+    composed_markdown, markdown_parent = _compose_markdown_parts(task, package_dir)
     if not composed_markdown:
         raise ValueError("邮件正文为空")
 
@@ -96,20 +106,6 @@ def render_task_email(task: MailTask, package_dir: Path) -> RenderedTaskEmail:
         html_for_email=html_for_email,
         inline_images=inline_images,
         attachments=attachments,
-    )
-
-
-def build_task_message(task: MailTask, package_dir: Path, from_email: str):
-    rendered = render_task_email(task, package_dir)
-    return build_email_message(
-        from_email=from_email,
-        to_email=task.to_recipients,
-        cc_email=task.cc_recipients,
-        subject=task.subject,
-        text_body=rendered.composed_markdown,
-        html_body=rendered.html_for_email,
-        inline_images=rendered.inline_images,
-        attachments=rendered.attachments,
     )
 
 

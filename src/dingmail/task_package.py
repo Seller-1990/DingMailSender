@@ -10,6 +10,7 @@ import openpyxl
 from .task_models import MailTask, PackageLayout
 
 TASKS_FILENAME = "tasks.xlsx"
+TASKS_SHEET_NAME = "Tasks"
 PACKAGE_README_FILENAME = "README_操作说明.md"
 CONTENT_DIRNAME = "content"
 ASSETS_DIRNAME = "assets"
@@ -95,15 +96,98 @@ def package_relpath(package_dir: Path, path: Path) -> str:
     try:
         return str(path.resolve().relative_to(package_dir.resolve()))
     except ValueError:
-        return str(path.resolve())
+        raise ValueError(f"路径必须位于任务包目录内：{path.resolve()}")
+
+
+def _resolve_within_package(package_dir: Path, path: Path) -> Path:
+    package_root = package_dir.resolve()
+    resolved = path.resolve() if path.is_absolute() else (package_root / path).resolve()
+    try:
+        resolved.relative_to(package_root)
+    except ValueError as exc:
+        raise ValueError(f"路径必须位于任务包目录内：{resolved}") from exc
+    return resolved
 
 
 def resolve_user_path(package_dir: Path, raw_path: str) -> Path:
     value = str(raw_path or "").strip()
     if not value:
         raise ValueError("路径为空")
-    path = Path(value)
-    return path.resolve() if path.is_absolute() else (package_dir / path).resolve()
+    return _resolve_within_package(package_dir, Path(value))
+
+
+def _select_tasks_sheet(workbook: openpyxl.Workbook):
+    return workbook[TASKS_SHEET_NAME] if TASKS_SHEET_NAME in workbook.sheetnames else workbook.active
+
+
+def _ensure_tasks_sheet(workbook: openpyxl.Workbook):
+    if TASKS_SHEET_NAME in workbook.sheetnames:
+        return workbook[TASKS_SHEET_NAME]
+
+    if len(workbook.sheetnames) == 1 and workbook.active.max_row == 1 and workbook.active.max_column == 1:
+        only_sheet = workbook.active
+        if only_sheet["A1"].value in (None, ""):
+            only_sheet.title = TASKS_SHEET_NAME
+            return only_sheet
+
+    return workbook.create_sheet(TASKS_SHEET_NAME, index=0)
+
+
+def ensure_unique_task_ids(tasks: list[MailTask]) -> list[str]:
+    seen_ids: dict[str, int] = {}
+    repairs: list[str] = []
+    for index, task in enumerate(tasks, start=2):
+        raw_task_id = str(task.task_id or "").strip()
+        if not raw_task_id:
+            task.task_id = uuid.uuid4().hex
+            repairs.append(f"第 {index} 行缺少任务ID，已自动重置。")
+            seen_ids[task.task_id] = index
+            continue
+
+        previous_row = seen_ids.get(raw_task_id)
+        if previous_row is not None:
+            task.task_id = uuid.uuid4().hex
+            repairs.append(f"第 {index} 行任务ID与第 {previous_row} 行重复，已自动重置。")
+            seen_ids[task.task_id] = index
+            continue
+
+        seen_ids[raw_task_id] = index
+
+    return repairs
+
+
+def _write_tasks_sheet(worksheet, tasks: list[MailTask]) -> None:
+    rows = [TASK_COLUMNS]
+    rows.extend(
+        [
+            task.task_id,
+            "是" if task.enabled else "否",
+            join_emails(task.to_recipients),
+            join_emails(task.cc_recipients),
+            task.subject,
+            task.intro_text,
+            task.markdown_path,
+            "是" if task.attachment_count() > 0 else "否",
+            join_paths(task.attachment_paths),
+            "是" if task.schedule_enabled else "否",
+            datetime_to_excel_text(task.scheduled_at),
+            task.note,
+        ]
+        for task in tasks
+    )
+
+    target_row_count = len(rows)
+    current_row_count = worksheet.max_row
+    if current_row_count < target_row_count:
+        worksheet.insert_rows(current_row_count + 1, target_row_count - current_row_count)
+    elif current_row_count > target_row_count:
+        worksheet.delete_rows(target_row_count + 1, current_row_count - target_row_count)
+
+    max_col_count = max(worksheet.max_column, len(TASK_COLUMNS))
+    for row_index, values in enumerate(rows, start=1):
+        for col_index in range(1, max_col_count + 1):
+            cell = worksheet.cell(row=row_index, column=col_index)
+            cell.value = values[col_index - 1] if col_index <= len(values) else None
 
 
 def load_tasks_from_package(package_dir: Path) -> list[MailTask]:
@@ -113,7 +197,7 @@ def load_tasks_from_package(package_dir: Path) -> list[MailTask]:
 
     workbook = openpyxl.load_workbook(tasks_path, data_only=True, read_only=True)
     try:
-        worksheet = workbook.active
+        worksheet = _select_tasks_sheet(workbook)
         rows = list(worksheet.iter_rows(values_only=True))
     finally:
         workbook.close()
@@ -158,30 +242,12 @@ def load_tasks_from_package(package_dir: Path) -> list[MailTask]:
 
 def save_tasks_to_package(package_dir: Path, tasks: list[MailTask]) -> Path:
     package_dir.mkdir(parents=True, exist_ok=True)
-    workbook = openpyxl.Workbook()
-    worksheet = workbook.active
-    worksheet.title = "Tasks"
-    worksheet.append(TASK_COLUMNS)
-
-    for task in tasks:
-        worksheet.append(
-            [
-                task.task_id,
-                "是" if task.enabled else "否",
-                join_emails(task.to_recipients),
-                join_emails(task.cc_recipients),
-                task.subject,
-                task.intro_text,
-                task.markdown_path,
-                "是" if task.attachment_count() > 0 else "否",
-                join_paths(task.attachment_paths),
-                "是" if task.schedule_enabled else "否",
-                datetime_to_excel_text(task.scheduled_at),
-                task.note,
-            ]
-        )
-
+    ensure_unique_task_ids(tasks)
     tasks_path = package_dir / TASKS_FILENAME
+    workbook = openpyxl.load_workbook(tasks_path) if tasks_path.exists() else openpyxl.Workbook()
+    worksheet = _ensure_tasks_sheet(workbook)
+    _write_tasks_sheet(worksheet, tasks)
+
     workbook.save(tasks_path)
     workbook.close()
     return tasks_path
@@ -218,6 +284,7 @@ def build_package_readme_text() -> str:
 ## 推荐填写方式
 
 - `收件人` / `抄送人`：多个邮箱用分号分隔
+- `任务ID`：程序会自动生成；如果缺失或重复，重新加载或保存时会自动修复
 - `Markdown路径`：优先填写相对任务包目录的路径，例如 `content/示例正文.md`
 - `附件路径`：多个附件路径用分号分隔，例如 `attachments/a.pdf; attachments/b.pdf`
 - `开头/补充内容`：支持换行，会拼接到 Markdown 正文前面
@@ -260,4 +327,3 @@ def clone_task(task: MailTask) -> MailTask:
     data["last_previewed_at"] = None
     data["last_send_result"] = ""
     return MailTask(**data)
-
