@@ -27,6 +27,9 @@ class TaskRuntimeController:
         self._validation_cache.clear()
 
     def reset_loaded_tasks(self, package_dir: Path, tasks: list[MailTask]) -> None:
+        same_package = self._package_dir is not None and package_dir.resolve() == self._package_dir.resolve()
+        previous_queued_ids = set(self.queued_task_ids) if same_package else set()
+
         self.set_package_dir(package_dir)
         self.invalidate_validation_cache()
         self.queued_task_ids.clear()
@@ -34,6 +37,12 @@ class TaskRuntimeController:
         self.drafting_task_ids.clear()
         for task in tasks:
             self.reset_runtime_fields(task)
+
+        for task in tasks:
+            if task.task_id not in previous_queued_ids or not task.enabled or not task.schedule_enabled:
+                continue
+            if not self.validate_task(task, check_schedule_time=False):
+                self.queued_task_ids.add(task.task_id)
 
     def sync_task_ids(self, tasks: list[MailTask]) -> None:
         valid_ids = {task.task_id for task in tasks}

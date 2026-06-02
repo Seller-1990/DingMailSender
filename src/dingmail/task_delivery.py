@@ -10,10 +10,19 @@ from .constants import (
     DEFAULT_IMAP_PORT_SSL,
     DEFAULT_RATE_LIMIT_SECONDS,
 )
-from .email_builder import build_email_message
+from .email_builder import EmailMessageInput, build_email_message
 from .imap_drafts import ImapDraftsSession
 from .model import SmtpConfig, SmtpSecurity
-from .run_store import RunPaths, append_manifest_row, create_run_paths, snapshot_file
+from .run_store import (
+    ManifestRow,
+    RunPaths,
+    append_manifest_row,
+    create_run_paths,
+    debug_artifacts_enabled,
+    redact_email,
+    redact_text,
+    snapshot_file,
+)
 from .smtp_sender import SmtpSession, rate_limit_sleep
 from .task_models import MailTask
 from .task_package import PACKAGE_README_FILENAME, TASKS_FILENAME
@@ -37,14 +46,17 @@ class SendTasksResult:
     outcomes: list[TaskDeliveryOutcome]
 
 
-def _safe_filename(text: str) -> str:
+def _safe_filename(text: str, limit: int = 48) -> str:
     parts = []
     for char in text:
         if char.isalnum() or char in ("-", "_", "."):
             parts.append(char)
         else:
             parts.append("_")
-    return "".join(parts).strip("_") or "task"
+    value = "".join(parts).strip("_") or "task"
+    if len(value) > limit:
+        value = value[:limit].rstrip("_")
+    return value or "task"
 
 
 def _build_logger(log_path: Path, name: str) -> logging.Logger:
@@ -66,31 +78,115 @@ def _close_logger(logger: logging.Logger) -> None:
         logger.removeHandler(handler)
 
 
-def _build_message_from_rendered(task: MailTask, from_email: str, rendered: RenderedTaskEmail):
+def _build_message_from_rendered(
+    task: MailTask,
+    from_email: str,
+    rendered: RenderedTaskEmail,
+):
     return build_email_message(
-        from_email=from_email,
-        to_email=task.to_recipients,
-        cc_email=task.cc_recipients,
-        subject=task.subject,
-        text_body=rendered.composed_markdown,
-        html_body=rendered.html_for_email,
-        inline_images=rendered.inline_images,
-        attachments=rendered.attachments,
+        EmailMessageInput(
+            from_email=from_email,
+            to_email=task.to_recipients,
+            cc_email=task.cc_recipients,
+            subject=task.subject,
+            text_body=rendered.composed_markdown,
+            html_body=rendered.html_for_email,
+            inline_images=rendered.inline_images,
+            attachments=rendered.attachments,
+        )
     )
 
 
-def _write_task_artifacts(
+@dataclass(frozen=True)
+class TaskArtifacts:
+    run_paths: RunPaths
+    index: int
+    task: MailTask
+    rendered: RenderedTaskEmail
+    message: object
+
+
+@dataclass(frozen=True)
+class DeliveryTaskContext:
+    run_paths: RunPaths
+    logger: logging.Logger
+    index: int
+    task: MailTask
+
+
+@dataclass(frozen=True)
+class SendTasksConfig:
+    tasks: list[MailTask]
+    package_dir: Path
+    home_dir: Path
+    smtp_host: str
+    smtp_port: int
+    smtp_security: str
+    smtp_username: str
+    smtp_password: str
+    rate_limit_seconds: float = DEFAULT_RATE_LIMIT_SECONDS
+
+
+@dataclass(frozen=True)
+class DraftsConfig:
+    tasks: list[MailTask]
+    package_dir: Path
+    home_dir: Path
+    imap_username: str
+    imap_password: str
+    imap_host: str = DEFAULT_IMAP_HOST
+    imap_port: int = DEFAULT_IMAP_PORT_SSL
+    rate_limit_seconds: float = DEFAULT_RATE_LIMIT_SECONDS
+
+
+def _task_recipient_text(task: MailTask) -> str:
+    return "; ".join(task.to_recipients)
+
+
+def _task_cc_text(task: MailTask) -> str:
+    return "; ".join(task.cc_recipients)
+
+
+def _build_outcome(
     *,
-    run_paths: RunPaths,
-    index: int,
     task: MailTask,
-    rendered: RenderedTaskEmail,
-    message,
-) -> None:
-    identity = task.subject or ";".join(task.to_recipients) or task.task_id
-    base = f"{index:03d}_{_safe_filename(identity)}"
-    (run_paths.previews_dir / f"{base}.preview.html").write_text(rendered.html_for_preview, encoding="utf-8")
-    (run_paths.eml_dir / f"{base}.eml").write_bytes(message.as_bytes())
+    status: str,
+    message_id: str | None,
+    error: str | None,
+) -> TaskDeliveryOutcome:
+    return TaskDeliveryOutcome(
+        task_id=task.task_id,
+        to_email=_task_recipient_text(task),
+        cc_email=_task_cc_text(task),
+        subject=task.subject,
+        status=status,
+        message_id=message_id,
+        error=error,
+    )
+
+
+def _append_outcome_manifest_row(manifest_csv: Path, *, idx: int, outcome: TaskDeliveryOutcome) -> None:
+    append_manifest_row(
+        manifest_csv,
+        ManifestRow(
+            idx=idx,
+            to_email=outcome.to_email,
+            subject=outcome.subject,
+            status=outcome.status,
+            message_id=outcome.message_id,
+            error=outcome.error,
+        ),
+    )
+
+
+def _write_task_artifacts(artifacts: TaskArtifacts) -> None:
+    if not debug_artifacts_enabled():
+        return
+    identity = artifacts.task.task_id or artifacts.task.subject or ";".join(artifacts.task.to_recipients)
+    base = f"{artifacts.index:03d}_{_safe_filename(identity)}"
+    preview_path = artifacts.run_paths.previews_dir / f"{base}.preview.html"
+    preview_path.write_text(artifacts.rendered.html_for_preview, encoding="utf-8")
+    (artifacts.run_paths.eml_dir / f"{base}.eml").write_bytes(artifacts.message.as_bytes())
 
 
 def _sleep_between_tasks(index: int, total: int, rate_limit_seconds: float) -> None:
@@ -98,182 +194,133 @@ def _sleep_between_tasks(index: int, total: int, rate_limit_seconds: float) -> N
         rate_limit_sleep(rate_limit_seconds)
 
 
-def send_tasks(
-    *,
-    tasks: list[MailTask],
-    package_dir: Path,
-    home_dir: Path,
-    smtp_host: str,
-    smtp_port: int,
-    smtp_security: str,
-    smtp_username: str,
-    smtp_password: str,
-    rate_limit_seconds: float = DEFAULT_RATE_LIMIT_SECONDS,
-) -> SendTasksResult:
-    run_paths = create_run_paths(home_dir=home_dir, campaign_dir=package_dir)
-    logger = _build_logger(run_paths.logs_dir / "send.log", f"dingmail.send.{run_paths.run_dir.name}")
-
+def _snapshot_package_files(package_dir: Path, run_paths: RunPaths) -> None:
     snapshot_file(package_dir / TASKS_FILENAME, run_paths.run_dir, TASKS_FILENAME)
     snapshot_file(package_dir / PACKAGE_README_FILENAME, run_paths.run_dir, PACKAGE_README_FILENAME)
 
-    normalized_security = str(smtp_security).strip().lower()
-    if normalized_security not in ("ssl", "starttls"):
-        raise ValueError(f"smtp_security 必须是 ssl 或 starttls，当前为：{smtp_security!r}")
 
-    smtp_cfg = SmtpConfig(
-        host=smtp_host,
-        port=smtp_port,
+def _smtp_config_from_delivery(config: SendTasksConfig) -> SmtpConfig:
+    normalized_security = str(config.smtp_security).strip().lower()
+    if normalized_security not in ("ssl", "starttls"):
+        raise ValueError(f"smtp_security 必须是 ssl 或 starttls，当前为：{config.smtp_security!r}")
+
+    return SmtpConfig(
+        host=config.smtp_host,
+        port=config.smtp_port,
         security=cast(SmtpSecurity, normalized_security),
-        username=smtp_username,
+        username=config.smtp_username,
     )
 
-    outcomes: list[TaskDeliveryOutcome] = []
-    total = len(tasks)
-    try:
-        with SmtpSession(smtp_cfg, smtp_password) as smtp:
-            for index, task in enumerate(tasks, start=1):
-                try:
-                    rendered = render_task_email(task, package_dir)
-                    message = _build_message_from_rendered(task, smtp_username, rendered)
-                    _write_task_artifacts(
-                        run_paths=run_paths,
-                        index=index,
-                        task=task,
-                        rendered=rendered,
-                        message=message,
-                    )
 
-                    result = smtp.send(message)
-                    outcome = TaskDeliveryOutcome(
-                        task_id=task.task_id,
-                        to_email="; ".join(task.to_recipients),
-                        cc_email="; ".join(task.cc_recipients),
-                        subject=task.subject,
-                        status="sent",
-                        message_id=result.message_id,
-                        error=None,
+def _send_single_task(
+    *,
+    smtp: SmtpSession,
+    config: SendTasksConfig,
+    context: DeliveryTaskContext,
+) -> TaskDeliveryOutcome:
+    try:
+        rendered = render_task_email(context.task, config.package_dir)
+        message = _build_message_from_rendered(context.task, config.smtp_username, rendered)
+        _write_task_artifacts(
+            TaskArtifacts(
+                run_paths=context.run_paths,
+                index=context.index,
+                task=context.task,
+                rendered=rendered,
+                message=message,
+            )
+        )
+        result = smtp.send(message)
+        outcome = _build_outcome(task=context.task, status="sent", message_id=result.message_id, error=None)
+        context.logger.info("sent task_id=%s to=%s", context.task.task_id, redact_email(outcome.to_email))
+    except Exception as exc:
+        outcome = _build_outcome(task=context.task, status="send_error", message_id=None, error=str(exc))
+        context.logger.error("send_error task_id=%s: %s", context.task.task_id, redact_text(str(exc)))
+
+    _append_outcome_manifest_row(context.run_paths.manifest_csv, idx=context.index, outcome=outcome)
+    return outcome
+
+
+def send_tasks(config: SendTasksConfig) -> SendTasksResult:
+    run_paths = create_run_paths(home_dir=config.home_dir, campaign_dir=config.package_dir)
+    logger = _build_logger(run_paths.logs_dir / "send.log", f"dingmail.send.{run_paths.run_dir.name}")
+    _snapshot_package_files(config.package_dir, run_paths)
+
+    outcomes: list[TaskDeliveryOutcome] = []
+    total = len(config.tasks)
+    try:
+        with SmtpSession(_smtp_config_from_delivery(config), config.smtp_password) as smtp:
+            for index, task in enumerate(config.tasks, start=1):
+                outcomes.append(
+                    _send_single_task(
+                        smtp=smtp,
+                        config=config,
+                        context=DeliveryTaskContext(run_paths=run_paths, logger=logger, index=index, task=task),
                     )
-                    append_manifest_row(
-                        run_paths.manifest_csv,
-                        idx=index,
-                        to_email=outcome.to_email,
-                        subject=outcome.subject,
-                        status=outcome.status,
-                        message_id=outcome.message_id,
-                        error=None,
-                    )
-                    outcomes.append(outcome)
-                    logger.info("sent task_id=%s to=%s", task.task_id, task.to_recipients)
-                except Exception as exc:
-                    outcome = TaskDeliveryOutcome(
-                        task_id=task.task_id,
-                        to_email="; ".join(task.to_recipients),
-                        cc_email="; ".join(task.cc_recipients),
-                        subject=task.subject,
-                        status="send_error",
-                        message_id=None,
-                        error=str(exc),
-                    )
-                    append_manifest_row(
-                        run_paths.manifest_csv,
-                        idx=index,
-                        to_email=outcome.to_email,
-                        subject=outcome.subject,
-                        status=outcome.status,
-                        message_id=None,
-                        error=outcome.error,
-                    )
-                    outcomes.append(outcome)
-                    logger.exception("send_error task_id=%s: %s", task.task_id, exc)
-                finally:
-                    _sleep_between_tasks(index, total, rate_limit_seconds)
+                )
+                _sleep_between_tasks(index, total, config.rate_limit_seconds)
         return SendTasksResult(run_paths=run_paths, outcomes=outcomes)
     finally:
         _close_logger(logger)
 
 
-def save_tasks_to_imap_drafts(
+def _save_single_draft(
     *,
-    tasks: list[MailTask],
-    package_dir: Path,
-    home_dir: Path,
-    imap_username: str,
-    imap_password: str,
-    imap_host: str = DEFAULT_IMAP_HOST,
-    imap_port: int = DEFAULT_IMAP_PORT_SSL,
-    rate_limit_seconds: float = DEFAULT_RATE_LIMIT_SECONDS,
-) -> SendTasksResult:
-    run_paths = create_run_paths(home_dir=home_dir, campaign_dir=package_dir)
-    logger = _build_logger(run_paths.logs_dir / "drafts.log", f"dingmail.drafts.{run_paths.run_dir.name}")
+    drafts: ImapDraftsSession,
+    config: DraftsConfig,
+    context: DeliveryTaskContext,
+) -> TaskDeliveryOutcome:
+    try:
+        rendered = render_task_email(context.task, config.package_dir)
+        message = _build_message_from_rendered(context.task, config.imap_username, rendered)
+        _write_task_artifacts(
+            TaskArtifacts(
+                run_paths=context.run_paths,
+                index=context.index,
+                task=context.task,
+                rendered=rendered,
+                message=message,
+            )
+        )
+        mailbox = drafts.append_draft(message)
+        outcome = _build_outcome(
+            task=context.task,
+            status="draft_saved",
+            message_id=message.get("Message-ID"),
+            error=None,
+        )
+        context.logger.info("draft_saved task_id=%s mailbox=%s", context.task.task_id, mailbox)
+    except Exception as exc:
+        outcome = _build_outcome(task=context.task, status="draft_error", message_id=None, error=str(exc))
+        context.logger.error("draft_error task_id=%s: %s", context.task.task_id, redact_text(str(exc)))
 
-    snapshot_file(package_dir / TASKS_FILENAME, run_paths.run_dir, TASKS_FILENAME)
-    snapshot_file(package_dir / PACKAGE_README_FILENAME, run_paths.run_dir, PACKAGE_README_FILENAME)
+    _append_outcome_manifest_row(context.run_paths.manifest_csv, idx=context.index, outcome=outcome)
+    return outcome
+
+
+def save_tasks_to_imap_drafts(config: DraftsConfig) -> SendTasksResult:
+    run_paths = create_run_paths(home_dir=config.home_dir, campaign_dir=config.package_dir)
+    logger = _build_logger(run_paths.logs_dir / "drafts.log", f"dingmail.drafts.{run_paths.run_dir.name}")
+    _snapshot_package_files(config.package_dir, run_paths)
 
     outcomes: list[TaskDeliveryOutcome] = []
-    total = len(tasks)
+    total = len(config.tasks)
     try:
         with ImapDraftsSession(
-            host=imap_host,
-            port=imap_port,
-            username=imap_username,
-            password=imap_password,
+            host=config.imap_host,
+            port=config.imap_port,
+            username=config.imap_username,
+            password=config.imap_password,
         ) as drafts:
-            for index, task in enumerate(tasks, start=1):
-                try:
-                    rendered = render_task_email(task, package_dir)
-                    message = _build_message_from_rendered(task, imap_username, rendered)
-                    _write_task_artifacts(
-                        run_paths=run_paths,
-                        index=index,
-                        task=task,
-                        rendered=rendered,
-                        message=message,
+            for index, task in enumerate(config.tasks, start=1):
+                outcomes.append(
+                    _save_single_draft(
+                        drafts=drafts,
+                        config=config,
+                        context=DeliveryTaskContext(run_paths=run_paths, logger=logger, index=index, task=task),
                     )
-
-                    mailbox = drafts.append_draft(message)
-                    outcome = TaskDeliveryOutcome(
-                        task_id=task.task_id,
-                        to_email="; ".join(task.to_recipients),
-                        cc_email="; ".join(task.cc_recipients),
-                        subject=task.subject,
-                        status="draft_saved",
-                        message_id=message.get("Message-ID"),
-                        error=None,
-                    )
-                    append_manifest_row(
-                        run_paths.manifest_csv,
-                        idx=index,
-                        to_email=outcome.to_email,
-                        subject=outcome.subject,
-                        status=outcome.status,
-                        message_id=outcome.message_id,
-                        error=None,
-                    )
-                    outcomes.append(outcome)
-                    logger.info("draft_saved task_id=%s mailbox=%s", task.task_id, mailbox)
-                except Exception as exc:
-                    outcome = TaskDeliveryOutcome(
-                        task_id=task.task_id,
-                        to_email="; ".join(task.to_recipients),
-                        cc_email="; ".join(task.cc_recipients),
-                        subject=task.subject,
-                        status="draft_error",
-                        message_id=None,
-                        error=str(exc),
-                    )
-                    append_manifest_row(
-                        run_paths.manifest_csv,
-                        idx=index,
-                        to_email=outcome.to_email,
-                        subject=outcome.subject,
-                        status=outcome.status,
-                        message_id=None,
-                        error=outcome.error,
-                    )
-                    outcomes.append(outcome)
-                    logger.exception("draft_error task_id=%s: %s", task.task_id, exc)
-                finally:
-                    _sleep_between_tasks(index, total, rate_limit_seconds)
+                )
+                _sleep_between_tasks(index, total, config.rate_limit_seconds)
         return SendTasksResult(run_paths=run_paths, outcomes=outcomes)
     finally:
         _close_logger(logger)

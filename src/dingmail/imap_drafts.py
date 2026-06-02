@@ -107,7 +107,9 @@ class ImapDraftsSession:
         status, boxes = self._imap.list()
         if status != "OK" or not boxes:
             return None
+        return self._pick_drafts_mailbox(self._parse_mailbox_entries(boxes))
 
+    def _parse_mailbox_entries(self, boxes) -> list[tuple[str, str, str]]:
         parsed_names: list[tuple[str, str, str]] = []
         for raw in boxes:
             if not raw:
@@ -121,7 +123,10 @@ class ImapDraftsSession:
             except Exception:
                 decoded_name = name
             parsed_names.append((line.lower(), name, decoded_name.lower()))
+        return parsed_names
 
+    @staticmethod
+    def _pick_drafts_mailbox(parsed_names: list[tuple[str, str, str]]) -> str | None:
         for line, name, _decoded_name in parsed_names:
             if "\\drafts" in line:
                 return name

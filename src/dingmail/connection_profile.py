@@ -14,7 +14,11 @@ class ConnectionProfile:
     smtp_password: str = ""
 
 
-class _DataBlob(ctypes.Structure):
+class ConnectionProfileLoadError(OSError):
+    pass
+
+
+class DataBlob(ctypes.Structure):
     _fields_ = [
         ("cbData", ctypes.c_uint32),
         ("pbData", ctypes.POINTER(ctypes.c_char)),
@@ -25,12 +29,12 @@ def _protect_secret(secret: str) -> tuple[str, str]:
     if not secret:
         return "plain", ""
     if sys.platform != "win32":
-        return "plain", secret
+        raise OSError("当前系统不支持安全保存 SMTP 授权码")
 
     raw = secret.encode("utf-8")
     buffer = ctypes.create_string_buffer(raw)
-    in_blob = _DataBlob(len(raw), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
-    out_blob = _DataBlob()
+    in_blob = DataBlob(len(raw), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
+    out_blob = DataBlob()
     if not ctypes.windll.crypt32.CryptProtectData(  # type: ignore[attr-defined]
         ctypes.byref(in_blob),
         None,
@@ -59,8 +63,8 @@ def _unprotect_secret(mode: str, payload: str) -> str:
 
     protected = base64.b64decode(payload.encode("ascii"))
     in_buffer = ctypes.create_string_buffer(protected)
-    in_blob = _DataBlob(len(protected), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_char)))
-    out_blob = _DataBlob()
+    in_blob = DataBlob(len(protected), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_char)))
+    out_blob = DataBlob()
     if not ctypes.windll.crypt32.CryptUnprotectData(  # type: ignore[attr-defined]
         ctypes.byref(in_blob),
         None,
@@ -88,10 +92,10 @@ def load_connection_profile(*paths: Path) -> ConnectionProfile:
         checked.add(path)
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
+        except Exception as exc:
+            raise ConnectionProfileLoadError(f"读取连接配置失败：{path}（{exc}）") from exc
         if not isinstance(raw, dict):
-            continue
+            raise ConnectionProfileLoadError(f"连接配置格式错误：{path} 顶层必须是对象")
 
         password_mode = str(raw.get("smtp_password_mode") or "plain").strip().lower()
         protected_password = raw.get("smtp_password_protected")
@@ -101,8 +105,8 @@ def load_connection_profile(*paths: Path) -> ConnectionProfile:
                 password_mode if protected_password is not None else "plain",
                 str(protected_password if protected_password is not None else raw_password),
             )
-        except Exception:
-            continue
+        except Exception as exc:
+            raise ConnectionProfileLoadError(f"连接配置中的 SMTP 授权码无法解密：{path}（{exc}）") from exc
 
         return ConnectionProfile(
             from_email=str(raw.get("from_email") or "").strip(),

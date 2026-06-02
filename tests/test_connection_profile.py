@@ -9,11 +9,18 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from dingmail.connection_profile import ConnectionProfile, load_connection_profile, save_connection_profile
+from dingmail.connection_profile import (
+    ConnectionProfile,
+    ConnectionProfileLoadError,
+    load_connection_profile,
+    save_connection_profile,
+)
 
 
 class ConnectionProfileTests(unittest.TestCase):
     def test_save_and_load_connection_profile(self) -> None:
+        if sys.platform != "win32":
+            self.skipTest("SMTP password persistence requires Windows DPAPI")
         with tempfile.TemporaryDirectory(prefix="dingmail_profile_") as tmp:
             profile_path = Path(tmp) / "conn_profile.json"
             save_connection_profile(
@@ -29,8 +36,16 @@ class ConnectionProfileTests(unittest.TestCase):
             )
             raw = profile_path.read_text(encoding="utf-8")
             self.assertIn("smtp_password_protected", raw)
-            if sys.platform == "win32":
-                self.assertNotIn("secret-token", raw)
+            self.assertNotIn("secret-token", raw)
+
+    def test_save_connection_profile_rejects_non_windows_password_persistence(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dingmail_profile_") as tmp, mock.patch.object(sys, "platform", "linux"):
+            with self.assertRaises(OSError):
+                save_connection_profile(
+                    Path(tmp) / "conn_profile.json",
+                    from_email="name@example.com",
+                    smtp_password="secret-token",
+                )
 
     def test_load_connection_profile_falls_back_to_legacy_password_key(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dingmail_profile_") as tmp:
@@ -57,6 +72,14 @@ class ConnectionProfileTests(unittest.TestCase):
             loaded = load_connection_profile(missing, fallback)
             self.assertEqual("fallback@example.com", loaded.from_email)
             self.assertEqual("fallback-token", loaded.smtp_password)
+
+    def test_load_connection_profile_reports_malformed_existing_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dingmail_profile_") as tmp:
+            profile_path = Path(tmp) / "conn_profile.json"
+            profile_path.write_text("{bad json", encoding="utf-8")
+
+            with self.assertRaises(ConnectionProfileLoadError):
+                load_connection_profile(profile_path)
 
     def test_save_connection_profile_falls_back_to_next_writable_path(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dingmail_profile_") as tmp:

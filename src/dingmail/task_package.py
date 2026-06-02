@@ -32,6 +32,8 @@ TASK_COLUMNS = [
     "备注",
 ]
 
+ExtraColumnState = tuple[range, dict[int, object]]
+
 
 def default_package_layout(package_dir: Path) -> PackageLayout:
     return PackageLayout(
@@ -156,42 +158,80 @@ def ensure_unique_task_ids(tasks: list[MailTask]) -> list[str]:
     return repairs
 
 
-def _write_tasks_sheet(worksheet, tasks: list[MailTask]) -> None:
-    rows = [TASK_COLUMNS]
-    rows.extend(
-        [
-            task.task_id,
-            "是" if task.enabled else "否",
-            join_emails(task.to_recipients),
-            join_emails(task.cc_recipients),
-            task.subject,
-            task.intro_text,
-            task.markdown_path,
-            "是" if task.attachment_count() > 0 else "否",
-            join_paths(task.attachment_paths),
-            "是" if task.schedule_enabled else "否",
-            datetime_to_excel_text(task.scheduled_at),
-            task.note,
-        ]
-        for task in tasks
-    )
+def _task_row_values(task: MailTask) -> list[object]:
+    return [
+        task.task_id,
+        "是" if task.enabled else "否",
+        join_emails(task.to_recipients),
+        join_emails(task.cc_recipients),
+        task.subject,
+        task.intro_text,
+        task.markdown_path,
+        "是" if task.attachment_count() > 0 else "否",
+        join_paths(task.attachment_paths),
+        "是" if task.schedule_enabled else "否",
+        datetime_to_excel_text(task.scheduled_at),
+        task.note,
+    ]
 
-    target_row_count = len(rows)
+
+def _snapshot_extra_task_columns(worksheet) -> tuple[range, dict[int, object], dict[str, dict[int, object]]]:
+    extra_start = len(TASK_COLUMNS) + 1
+    extra_columns = range(extra_start, worksheet.max_column + 1)
+    extra_headers = {col: worksheet.cell(row=1, column=col).value for col in extra_columns}
+    extra_values_by_task_id: dict[str, dict[int, object]] = {}
+    for row_index in range(2, worksheet.max_row + 1):
+        task_id = str(worksheet.cell(row=row_index, column=1).value or "").strip()
+        if not task_id:
+            continue
+        extra_values_by_task_id[task_id] = {
+            col: worksheet.cell(row=row_index, column=col).value for col in extra_columns
+        }
+    return extra_columns, extra_headers, extra_values_by_task_id
+
+
+def _resize_task_sheet_rows(worksheet, target_row_count: int) -> None:
     current_row_count = worksheet.max_row
     if current_row_count < target_row_count:
         worksheet.insert_rows(current_row_count + 1, target_row_count - current_row_count)
     elif current_row_count > target_row_count:
         worksheet.delete_rows(target_row_count + 1, current_row_count - target_row_count)
 
-    max_col_count = max(worksheet.max_column, len(TASK_COLUMNS))
-    for row_index, values in enumerate(rows, start=1):
-        for col_index in range(1, max_col_count + 1):
-            cell = worksheet.cell(row=row_index, column=col_index)
-            cell.value = values[col_index - 1] if col_index <= len(values) else None
+
+def _write_task_header(worksheet, extra_headers: dict[int, object]) -> None:
+    for col_index, value in enumerate(TASK_COLUMNS, start=1):
+        worksheet.cell(row=1, column=col_index).value = value
+    for col_index, value in extra_headers.items():
+        worksheet.cell(row=1, column=col_index).value = value
 
 
-def load_tasks_from_package(package_dir: Path) -> list[MailTask]:
-    tasks_path = package_dir / TASKS_FILENAME
+def _write_task_row(
+    worksheet,
+    row_index: int,
+    task: MailTask,
+    extra_state: ExtraColumnState,
+) -> None:
+    extra_columns, extra_values = extra_state
+    for col_index, value in enumerate(_task_row_values(task), start=1):
+        worksheet.cell(row=row_index, column=col_index).value = value
+    for col_index in extra_columns:
+        worksheet.cell(row=row_index, column=col_index).value = extra_values.get(col_index)
+
+
+def _write_tasks_sheet(worksheet, tasks: list[MailTask]) -> None:
+    extra_columns, extra_headers, extra_values_by_task_id = _snapshot_extra_task_columns(worksheet)
+    _resize_task_sheet_rows(worksheet, len(tasks) + 1)
+    _write_task_header(worksheet, extra_headers)
+    for row_index, task in enumerate(tasks, start=2):
+        _write_task_row(
+            worksheet,
+            row_index=row_index,
+            task=task,
+            extra_state=(extra_columns, extra_values_by_task_id.get(task.task_id, {})),
+        )
+
+
+def _read_task_rows(tasks_path: Path) -> list[tuple[object, ...]]:
     if not tasks_path.is_file():
         raise FileNotFoundError(f"未找到任务表：{tasks_path}")
 
@@ -201,41 +241,54 @@ def load_tasks_from_package(package_dir: Path) -> list[MailTask]:
         rows = list(worksheet.iter_rows(values_only=True))
     finally:
         workbook.close()
+    return rows
 
+
+def _task_header_map(header_row: tuple[object, ...]) -> dict[str, int]:
+    headers = [str(value).strip() if value is not None else "" for value in header_row]
+    return {name: index for index, name in enumerate(headers) if name}
+
+
+def _row_value(row: tuple[object, ...], header_map: dict[str, int], column: str) -> object:
+    index = header_map.get(column)
+    if index is None or index >= len(row):
+        return None
+    return row[index]
+
+
+def _is_blank_task_row(row: tuple[object, ...]) -> bool:
+    return not row or all(value is None or str(value).strip() == "" for value in row)
+
+
+def _mail_task_from_row(row: tuple[object, ...], header_map: dict[str, int]) -> MailTask:
+    value = lambda column: _row_value(row, header_map, column)
+    return MailTask(
+        task_id=str(value("任务ID") or uuid.uuid4().hex),
+        enabled=parse_bool(value("是否启用")) if value("是否启用") is not None else True,
+        to_recipients=split_emails(str(value("收件人") or "")),
+        cc_recipients=split_emails(str(value("抄送人") or "")),
+        subject=str(value("主题") or "").strip(),
+        intro_text=str(value("开头/补充内容") or ""),
+        markdown_path=str(value("Markdown路径") or "").strip(),
+        attachment_paths=split_paths(str(value("附件路径") or "")),
+        schedule_enabled=parse_bool(value("是否定时发送")),
+        scheduled_at=parse_datetime(value("定时发送时间")),
+        note=str(value("备注") or "").strip(),
+    )
+
+
+def load_tasks_from_package(package_dir: Path) -> list[MailTask]:
+    tasks_path = package_dir / TASKS_FILENAME
+    rows = _read_task_rows(tasks_path)
     if not rows:
         return []
 
-    headers = [str(x).strip() if x is not None else "" for x in rows[0]]
-    header_map = {name: idx for idx, name in enumerate(headers) if name}
-
+    header_map = _task_header_map(rows[0])
     tasks: list[MailTask] = []
     for row in rows[1:]:
-        if not row:
+        if _is_blank_task_row(row):
             continue
-        if all(v is None or str(v).strip() == "" for v in row):
-            continue
-
-        def value_of(column: str) -> object:
-            idx = header_map.get(column)
-            if idx is None or idx >= len(row):
-                return None
-            return row[idx]
-
-        attachments = split_paths(str(value_of("附件路径") or ""))
-        task = MailTask(
-            task_id=str(value_of("任务ID") or uuid.uuid4().hex),
-            enabled=parse_bool(value_of("是否启用")) if value_of("是否启用") is not None else True,
-            to_recipients=split_emails(str(value_of("收件人") or "")),
-            cc_recipients=split_emails(str(value_of("抄送人") or "")),
-            subject=str(value_of("主题") or "").strip(),
-            intro_text=str(value_of("开头/补充内容") or ""),
-            markdown_path=str(value_of("Markdown路径") or "").strip(),
-            attachment_paths=attachments,
-            schedule_enabled=parse_bool(value_of("是否定时发送")),
-            scheduled_at=parse_datetime(value_of("定时发送时间")),
-            note=str(value_of("备注") or "").strip(),
-        )
-        tasks.append(task)
+        tasks.append(_mail_task_from_row(row, header_map))
 
     return tasks
 

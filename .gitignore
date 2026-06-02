@@ -20,6 +20,7 @@ release/
 # IDE
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 
@@ -27,6 +28,12 @@ release/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Runtime output
+runs/
+.playwright-mcp/
+dingmail-workbench-*.png
+.pytest_cache/
 
 # Secrets
 conn_profile.json

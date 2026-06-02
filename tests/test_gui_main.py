@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,7 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from PySide6 import QtGui, QtWidgets
 
 from dingmail.connection_profile import ConnectionProfile
-from dingmail.gui.main import MainWindow
+from dingmail.gui.main import MainWindow, RunHistoryDialog
 from dingmail.task_models import MailTask
 from dingmail.task_package import TASKS_FILENAME, TASKS_SHEET_NAME, load_tasks_from_package, save_tasks_to_package
 
@@ -100,6 +101,30 @@ class MainWindowGuiTests(unittest.TestCase):
         saved_tasks = load_tasks_from_package(package_dir)
         self.assertEqual(2, len({task.task_id for task in saved_tasks}))
 
+    def test_reload_package_preserves_valid_queued_tasks(self) -> None:
+        package_dir = self._create_package_dir("queued")
+        save_tasks_to_package(
+            package_dir,
+            [
+                MailTask(
+                    task_id="task-1",
+                    to_recipients=["a@example.com"],
+                    subject="主题",
+                    markdown_path="content/body.md",
+                    schedule_enabled=True,
+                    scheduled_at=datetime.now() + timedelta(hours=1),
+                )
+            ],
+        )
+
+        window = self._create_window()
+        window._load_package(package_dir)
+        window._runtime.queued_task_ids.add("task-1")
+        window._reload_package()
+
+        self.assertEqual({"task-1"}, window._runtime.queued_task_ids)
+        self.assertEqual("已加入定时队列", window._tasks[0].status)
+
     def test_table_selection_and_smtp_state_refresh_buttons(self) -> None:
         package_dir = self._create_package_dir("basic")
         save_tasks_to_package(
@@ -132,6 +157,65 @@ class MainWindowGuiTests(unittest.TestCase):
         self._process_events()
         self.assertTrue(window._send_now_btn.isEnabled())
         self.assertTrue(window._save_drafts_btn.isEnabled())
+
+    def test_workbench_layout_detail_panel_and_filters(self) -> None:
+        package_dir = self._create_package_dir("workbench")
+        save_tasks_to_package(
+            package_dir,
+            [
+                MailTask(
+                    task_id="task-1",
+                    to_recipients=["a@example.com"],
+                    subject="可保存草稿",
+                    markdown_path="content/body.md",
+                ),
+                MailTask(
+                    task_id="task-2",
+                    to_recipients=["b@example.com"],
+                    subject="缺少正文",
+                    markdown_path="content/missing.md",
+                ),
+            ],
+        )
+
+        window = self._create_window()
+        window._load_package(package_dir)
+        self._process_events()
+
+        self.assertEqual(8, window._task_table.columnCount())
+        self.assertEqual("状态", window._task_table.horizontalHeaderItem(0).text())
+        self.assertEqual("保存草稿", window._save_drafts_btn.text())
+        self.assertEqual("运行历史", window._open_last_run_btn.text())
+        self.assertEqual("primary", window._save_drafts_btn.property("variant"))
+        self.assertEqual("danger", window._send_now_btn.property("variant"))
+
+        window._task_table.selectRow(0)
+        self._process_events()
+        self.assertEqual("可保存草稿", window._detail_title_label.text())
+
+        window._set_task_filter("issue")
+        self._process_events()
+        self.assertTrue(window._task_table.isRowHidden(0))
+        self.assertFalse(window._task_table.isRowHidden(1))
+
+    def test_run_history_dialog_summarizes_manifest(self) -> None:
+        runs_root = self.home_dir / "runs"
+        run_dir = runs_root / "20260602_120000_demo"
+        run_dir.mkdir(parents=True)
+        (run_dir / "manifest.csv").write_text(
+            "idx,to_email,subject,status,message_id,error\n"
+            "1,us***@example.com,主题,draft_saved,<m1>,\n"
+            "2,us***@example.com,主题,draft_error,,缺少图片\n",
+            encoding="utf-8",
+        )
+
+        dialog = RunHistoryDialog(runs_root=runs_root)
+        self.addCleanup(dialog.deleteLater)
+
+        item_text = dialog._list.item(0).text()
+        self.assertIn("保存草稿", item_text)
+        self.assertIn("成功 1", item_text)
+        self.assertIn("失败 1", item_text)
 
     def test_close_event_minimizes_to_tray_when_connected(self) -> None:
         window = self._create_window()

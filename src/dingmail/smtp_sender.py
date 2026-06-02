@@ -23,7 +23,12 @@ class SmtpSession:
 
     def __enter__(self) -> "SmtpSession":
         if self._cfg.security == "ssl":
-            server: SMTP = SMTP_SSL(self._cfg.host, self._cfg.port, timeout=self._timeout, context=ssl.create_default_context())
+            server: SMTP = SMTP_SSL(
+                self._cfg.host,
+                self._cfg.port,
+                timeout=self._timeout,
+                context=ssl.create_default_context(),
+            )
         else:
             server = SMTP(self._cfg.host, self._cfg.port, timeout=self._timeout)
         server.ehlo()
@@ -60,4 +65,3 @@ def rate_limit_sleep(seconds: float) -> None:
     if seconds <= 0:
         return
     time.sleep(seconds)
-

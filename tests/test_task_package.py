@@ -102,6 +102,36 @@ class TaskPackageTests(unittest.TestCase):
         self.assertEqual("B2", saved[TASKS_SHEET_NAME].freeze_panes)
         self.assertEqual(24, saved[TASKS_SHEET_NAME].column_dimensions["A"].width)
 
+    def test_save_tasks_preserves_unknown_task_sheet_columns_by_task_id(self) -> None:
+        workbook = openpyxl.Workbook()
+        tasks = workbook.active
+        tasks.title = TASKS_SHEET_NAME
+        tasks.append(
+            ["任务ID", "是否启用", "收件人", "抄送人", "主题", "开头/补充内容", "Markdown路径", "是否有附件", "附件路径", "是否定时发送", "定时发送时间", "备注", "人工复核备注"]
+        )
+        tasks.append(["task-1", "是", "old@example.com", "", "旧主题", "", "content/body.md", "否", "", "否", "", "", "保留这列"])
+        workbook.save(self.package_dir / TASKS_FILENAME)
+        workbook.close()
+
+        save_tasks_to_package(
+            self.package_dir,
+            [
+                MailTask(
+                    task_id="task-1",
+                    to_recipients=["a@example.com"],
+                    subject="新主题",
+                    markdown_path="content/body.md",
+                )
+            ],
+        )
+
+        saved = openpyxl.load_workbook(self.package_dir / TASKS_FILENAME)
+        self.addCleanup(saved.close)
+        sheet = saved[TASKS_SHEET_NAME]
+        self.assertEqual("人工复核备注", sheet.cell(row=1, column=13).value)
+        self.assertEqual("保留这列", sheet.cell(row=2, column=13).value)
+        self.assertEqual("新主题", sheet.cell(row=2, column=5).value)
+
     def test_ensure_unique_task_ids_repairs_missing_and_duplicate_ids(self) -> None:
         tasks = [
             MailTask(task_id="task-1", markdown_path="content/body.md"),

@@ -5,14 +5,24 @@ import sys
 from pathlib import Path
 
 
+APP_DIRNAME = "DingMailSender"
+
+
 def program_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[2]
 
 
+def user_config_dir() -> Path:
+    local_app_data = os.getenv("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data).expanduser().resolve() / APP_DIRNAME
+    return Path.home().expanduser().resolve() / ".config" / APP_DIRNAME
+
+
 def connection_profile_path() -> Path:
-    return program_dir() / "conn_profile.json"
+    return user_config_dir() / "conn_profile.json"
 
 
 def _looks_like_home_dir(candidate: Path) -> bool:

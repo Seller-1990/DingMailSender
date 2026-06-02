@@ -1,0 +1,1150 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DingMail 无侧栏工作台方案</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: oklch(96.5% 0.012 230);
+      --surface: oklch(99% 0.006 230);
+      --surface-raised: oklch(97.8% 0.009 230);
+      --line: oklch(87% 0.022 235);
+      --line-strong: oklch(78% 0.035 235);
+      --text: oklch(24% 0.032 236);
+      --muted: oklch(48% 0.035 235);
+      --subtle: oklch(66% 0.03 235);
+      --primary: oklch(52% 0.14 248);
+      --primary-ink: oklch(28% 0.12 248);
+      --primary-soft: oklch(92% 0.055 248);
+      --success-soft: oklch(92% 0.055 155);
+      --success-ink: oklch(36% 0.11 155);
+      --warning-soft: oklch(93% 0.06 78);
+      --warning-ink: oklch(42% 0.11 78);
+      --danger-soft: oklch(93% 0.055 25);
+      --danger-ink: oklch(40% 0.13 25);
+      --draft-soft: oklch(92% 0.055 205);
+      --draft-ink: oklch(34% 0.11 205);
+      --shadow: 0 16px 40px oklch(28% 0.035 235 / 0.12);
+      --radius: 8px;
+      --space-1: 4px;
+      --space-2: 8px;
+      --space-3: 12px;
+      --space-4: 16px;
+      --space-5: 24px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      min-width: 320px;
+      background: var(--canvas);
+      color: var(--text);
+      font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--canvas);
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+      cursor: pointer;
+    }
+
+    button:focus-visible,
+    input:focus-visible,
+    select:focus-visible {
+      outline: 3px solid oklch(72% 0.14 248 / 0.55);
+      outline-offset: 2px;
+    }
+
+    .app {
+      display: grid;
+      grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+      gap: var(--space-4);
+      min-height: 100vh;
+      padding: var(--space-4);
+    }
+
+    .topbar,
+    .commandbar,
+    .runbar,
+    .panel,
+    .metric,
+    .dialog-panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-4);
+      padding: var(--space-4);
+      box-shadow: var(--shadow);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      min-width: 0;
+    }
+
+    .brand-mark {
+      display: inline-grid;
+      place-items: center;
+      width: 38px;
+      height: 38px;
+      border-radius: 8px;
+      background: var(--primary);
+      color: white;
+      box-shadow: 0 10px 24px oklch(45% 0.13 248 / 0.22);
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 1.1rem;
+      line-height: 1.2;
+    }
+
+    .brand p,
+    .muted,
+    .meta {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .top-actions,
+    .commandbar,
+    .filters,
+    .button-row,
+    .runbar,
+    .status-pill,
+    .tag,
+    .field-row,
+    .dialog-actions {
+      display: flex;
+      align-items: center;
+    }
+
+    .top-actions,
+    .commandbar,
+    .filters,
+    .button-row,
+    .dialog-actions {
+      gap: var(--space-2);
+      flex-wrap: wrap;
+    }
+
+    .status-pill,
+    .tag {
+      gap: 6px;
+      border-radius: 999px;
+      white-space: nowrap;
+      font-weight: 700;
+    }
+
+    .status-pill {
+      min-height: 32px;
+      padding: 0 var(--space-3);
+      border: 1px solid var(--line);
+      background: var(--surface-raised);
+      color: var(--muted);
+    }
+
+    .status-pill.success {
+      color: var(--success-ink);
+      background: var(--success-soft);
+      border-color: oklch(80% 0.065 155);
+    }
+
+    .package-summary {
+      display: grid;
+      gap: 2px;
+      min-width: min(520px, 100%);
+      padding: 0 var(--space-3);
+      border-left: 1px solid var(--line);
+    }
+
+    .package-summary strong {
+      line-height: 1.25;
+    }
+
+    .btn,
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: var(--space-2);
+      min-height: 38px;
+      padding: 0 var(--space-4);
+      border-radius: var(--radius);
+      border: 1px solid var(--line-strong);
+      background: var(--surface);
+      color: var(--text);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .btn:hover,
+    .chip:hover {
+      background: var(--surface-raised);
+    }
+
+    .btn.primary,
+    .chip.is-active {
+      border-color: var(--primary);
+      background: var(--primary);
+      color: white;
+    }
+
+    .btn.danger {
+      color: var(--danger-ink);
+      border-color: oklch(79% 0.08 25);
+      background: var(--danger-soft);
+    }
+
+    .btn.ghost {
+      color: var(--muted);
+      border-color: transparent;
+      background: transparent;
+    }
+
+    .commandbar {
+      justify-content: space-between;
+      padding: var(--space-3) var(--space-4);
+    }
+
+    .command-left,
+    .command-right {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      flex-wrap: wrap;
+    }
+
+    .metric-strip {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(136px, 1fr));
+      gap: var(--space-3);
+    }
+
+    .metric {
+      display: grid;
+      gap: var(--space-2);
+      min-height: 88px;
+      padding: var(--space-4);
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    .metric strong {
+      font-size: 1.55rem;
+      line-height: 1;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(520px, var(--task-width, 62fr)) 12px minmax(420px, var(--review-width, 38fr));
+      gap: 0;
+      min-height: 0;
+    }
+
+    .splitter {
+      position: relative;
+      cursor: col-resize;
+    }
+
+    .splitter::before {
+      content: "";
+      position: absolute;
+      inset: 0 5px;
+      border-radius: 999px;
+      background: var(--line-strong);
+    }
+
+    .panel {
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: var(--space-4);
+      padding: var(--space-4);
+      border-bottom: 1px solid var(--line);
+      background: oklch(98.2% 0.009 230);
+    }
+
+    .panel-title {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .panel-title h2 {
+      margin: 0;
+      font-size: 1rem;
+      line-height: 1.25;
+    }
+
+    .task-tools {
+      display: grid;
+      gap: var(--space-3);
+      padding: var(--space-4);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .filters {
+      justify-content: space-between;
+    }
+
+    .filter-left {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      flex-wrap: wrap;
+    }
+
+    .search-shell {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      min-height: 38px;
+      width: min(320px, 100%);
+      padding: 0 var(--space-3);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+
+    input,
+    select {
+      width: 100%;
+      min-width: 0;
+      border: 0;
+      background: transparent;
+      color: var(--text);
+    }
+
+    .task-table-wrap {
+      overflow: auto;
+      max-height: calc(100vh - 368px);
+    }
+
+    table {
+      width: 100%;
+      min-width: 820px;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 0.86rem;
+    }
+
+    th,
+    td {
+      padding: 10px 11px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: oklch(97.8% 0.009 230);
+      color: var(--muted);
+      font-size: 0.78rem;
+      font-weight: 700;
+    }
+
+    tbody tr {
+      cursor: pointer;
+      background: var(--surface);
+    }
+
+    tbody tr:hover {
+      background: oklch(98% 0.014 230);
+    }
+
+    tbody tr.is-selected {
+      background: var(--primary-soft);
+      box-shadow: inset 3px 0 0 var(--primary);
+    }
+
+    col.status { width: 82px; }
+    col.to { width: 18%; }
+    col.subject { width: 20%; }
+    col.body { width: 18%; }
+    col.attach { width: 72px; }
+    col.schedule { width: 64px; }
+    col.time { width: 126px; }
+    col.note { width: auto; }
+
+    .tag {
+      width: fit-content;
+      min-height: 24px;
+      padding: 0 9px;
+      border: 1px solid transparent;
+      font-size: 0.78rem;
+    }
+
+    .tag.ready {
+      color: var(--success-ink);
+      background: var(--success-soft);
+      border-color: oklch(80% 0.065 155);
+    }
+
+    .tag.draft {
+      color: var(--draft-ink);
+      background: var(--draft-soft);
+      border-color: oklch(80% 0.07 205);
+    }
+
+    .tag.issue {
+      color: var(--danger-ink);
+      background: var(--danger-soft);
+      border-color: oklch(80% 0.07 25);
+    }
+
+    .tag.queue {
+      color: var(--warning-ink);
+      background: var(--warning-soft);
+      border-color: oklch(80% 0.07 78);
+    }
+
+    .tag.neutral {
+      color: var(--muted);
+      background: var(--surface-raised);
+      border-color: var(--line);
+    }
+
+    .review-panel {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+
+    .review-body {
+      display: grid;
+      grid-template-rows: auto auto minmax(320px, 1fr);
+      gap: var(--space-4);
+      padding: var(--space-4);
+      overflow: auto;
+    }
+
+    .field-grid {
+      display: grid;
+      gap: var(--space-2);
+    }
+
+    .field-row {
+      justify-content: space-between;
+      gap: var(--space-3);
+      padding-bottom: var(--space-2);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .field-row span:first-child {
+      color: var(--subtle);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .field-row strong {
+      text-align: right;
+      overflow-wrap: anywhere;
+    }
+
+    .check-list {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: var(--space-2);
+    }
+
+    .check-item {
+      display: grid;
+      gap: 6px;
+      min-height: 64px;
+      padding: var(--space-3);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-raised);
+    }
+
+    .mail-preview {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      min-height: 360px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: oklch(99% 0.004 235);
+      overflow: hidden;
+    }
+
+    .mail-head {
+      display: grid;
+      gap: 4px;
+      padding: var(--space-4);
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-raised);
+    }
+
+    .mail-body {
+      display: grid;
+      align-content: start;
+      gap: var(--space-3);
+      padding: var(--space-4);
+      line-height: 1.65;
+      overflow: auto;
+    }
+
+    .mini-chart {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: var(--space-2);
+    }
+
+    .mini-card {
+      padding: var(--space-3);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-raised);
+    }
+
+    .mini-card span {
+      display: block;
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+
+    .mini-card strong {
+      display: block;
+      margin-top: 4px;
+    }
+
+    .review-actions {
+      display: grid;
+      gap: var(--space-3);
+      padding: var(--space-4);
+      border-top: 1px solid var(--line);
+      background: oklch(98.2% 0.009 230);
+    }
+
+    .runbar {
+      justify-content: space-between;
+      gap: var(--space-4);
+      padding: var(--space-4);
+    }
+
+    .run-left {
+      display: flex;
+      align-items: center;
+      gap: var(--space-4);
+      flex-wrap: wrap;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--primary);
+      box-shadow: 0 0 0 5px oklch(72% 0.14 248 / 0.18);
+    }
+
+    .modal {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      display: none;
+      place-items: center;
+      padding: var(--space-5);
+      background: oklch(20% 0.035 236 / 0.42);
+    }
+
+    .modal.is-open {
+      display: grid;
+    }
+
+    .dialog-panel {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      width: min(920px, calc(100vw - 32px));
+      max-height: min(780px, calc(100vh - 32px));
+      box-shadow: 0 24px 70px oklch(18% 0.03 236 / 0.32);
+      overflow: hidden;
+    }
+
+    .dialog-header,
+    .dialog-actions {
+      padding: var(--space-4);
+      background: var(--surface-raised);
+    }
+
+    .dialog-header {
+      display: flex;
+      justify-content: space-between;
+      gap: var(--space-4);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .dialog-header h2 {
+      margin: 0;
+      font-size: 1.05rem;
+    }
+
+    .doc-preview {
+      padding: var(--space-5);
+      overflow: auto;
+      line-height: 1.75;
+      background: var(--surface);
+    }
+
+    .doc-preview h3 {
+      margin: var(--space-5) 0 var(--space-2);
+    }
+
+    .doc-preview h3:first-child {
+      margin-top: 0;
+    }
+
+    .doc-preview code {
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: var(--surface-raised);
+      border: 1px solid var(--line);
+    }
+
+    .dialog-actions {
+      justify-content: flex-end;
+      border-top: 1px solid var(--line);
+    }
+
+    .toast {
+      position: fixed;
+      right: var(--space-5);
+      bottom: var(--space-5);
+      display: none;
+      align-items: center;
+      gap: var(--space-3);
+      max-width: min(420px, calc(100vw - 32px));
+      padding: var(--space-4);
+      border-radius: var(--radius);
+      background: oklch(24% 0.03 236);
+      color: white;
+      box-shadow: 0 18px 50px oklch(20% 0.03 236 / 0.3);
+    }
+
+    .toast.is-visible {
+      display: flex;
+    }
+
+    .icon {
+      width: 16px;
+      height: 16px;
+      flex: none;
+      stroke-width: 2;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 1160px) {
+      .metric-strip {
+        grid-template-columns: repeat(3, minmax(150px, 1fr));
+      }
+
+      .workspace {
+        grid-template-columns: 1fr;
+        gap: var(--space-4);
+      }
+
+      .splitter {
+        display: none;
+      }
+
+      .task-table-wrap {
+        max-height: 460px;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .app {
+        padding: var(--space-3);
+      }
+
+      .topbar,
+      .commandbar,
+      .runbar {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .package-summary {
+        border-left: 0;
+        padding-left: 0;
+      }
+
+      .top-actions,
+      .command-left,
+      .command-right,
+      .filters,
+      .filter-left,
+      .button-row {
+        width: 100%;
+      }
+
+      .btn,
+      .chip {
+        flex: 1 1 auto;
+      }
+
+      .metric-strip {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .search-shell {
+        width: 100%;
+      }
+
+      .check-list,
+      .mini-chart {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark"><i data-lucide="mail-check" class="icon" aria-hidden="true"></i></div>
+        <div>
+          <h1>DingMail 工作台</h1>
+          <p>草稿复核优先</p>
+        </div>
+        <div class="package-summary">
+          <strong>预算执行通知 / 2026-06</strong>
+          <p class="muted">D:\DingMailSender\packages\预算执行通知</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span class="status-pill success"><i data-lucide="shield-check" class="icon" aria-hidden="true"></i>SMTP 已连接</span>
+        <button class="btn" type="button" data-modal="connectionModal">
+          <i data-lucide="settings" class="icon" aria-hidden="true"></i>
+          连接设置
+        </button>
+      </div>
+    </header>
+
+    <section class="commandbar" aria-label="任务包操作">
+      <div class="command-left">
+        <button class="btn"><i data-lucide="download" class="icon" aria-hidden="true"></i>下载模板</button>
+        <button class="btn"><i data-lucide="folder-open" class="icon" aria-hidden="true"></i>导入任务包</button>
+        <button class="btn"><i data-lucide="refresh-cw" class="icon" aria-hidden="true"></i>重新加载</button>
+        <button class="btn"><i data-lucide="sheet" class="icon" aria-hidden="true"></i>打开 tasks.xlsx</button>
+      </div>
+      <div class="command-right">
+        <button class="btn" type="button" data-modal="helpModal">
+          <i data-lucide="book-open" class="icon" aria-hidden="true"></i>
+          操作说明
+        </button>
+        <button class="btn"><i data-lucide="history" class="icon" aria-hidden="true"></i>运行历史</button>
+      </div>
+    </section>
+
+    <section class="metric-strip" aria-label="任务概览">
+      <div class="metric"><span>启用任务</span><strong>42</strong><span>当前任务包</span></div>
+      <div class="metric"><span>可保存草稿</span><strong>36</strong><span>校验通过</span></div>
+      <div class="metric"><span>需修正</span><strong>5</strong><span>路径或邮箱异常</span></div>
+      <div class="metric"><span>已保存草稿</span><strong>18</strong><span>本轮状态</span></div>
+      <div class="metric"><span>定时队列</span><strong>6</strong><span>托盘调度</span></div>
+    </section>
+
+    <section class="workspace" id="workspace">
+      <section class="panel" aria-label="邮件任务">
+        <div class="panel-header">
+          <div class="panel-title">
+            <h2>邮件任务</h2>
+            <p class="meta">筛选任务，选中后在右侧复核并保存草稿。</p>
+          </div>
+          <div class="button-row">
+            <button class="btn"><i data-lucide="plus" class="icon" aria-hidden="true"></i>新增</button>
+            <button class="btn"><i data-lucide="pencil" class="icon" aria-hidden="true"></i>编辑</button>
+            <button class="btn"><i data-lucide="copy" class="icon" aria-hidden="true"></i>复制</button>
+            <button class="btn danger"><i data-lucide="trash-2" class="icon" aria-hidden="true"></i>删除</button>
+          </div>
+        </div>
+
+        <div class="task-tools">
+          <div class="filters">
+            <div class="filter-left">
+              <button class="chip is-active" type="button" data-filter="all">全部</button>
+              <button class="chip" type="button" data-filter="ready">可保存草稿</button>
+              <button class="chip" type="button" data-filter="issue">需修正</button>
+              <button class="chip" type="button" data-filter="draft">已保存草稿</button>
+              <button class="chip" type="button" data-filter="queue">定时队列</button>
+            </div>
+            <label class="search-shell">
+              <i data-lucide="search" class="icon" aria-hidden="true"></i>
+              <span class="sr-only">搜索任务</span>
+              <input id="taskSearch" type="search" placeholder="搜索收件人、主题、备注">
+            </label>
+          </div>
+        </div>
+
+        <div class="task-table-wrap">
+          <table>
+            <colgroup>
+              <col class="status">
+              <col class="to">
+              <col class="subject">
+              <col class="body">
+              <col class="attach">
+              <col class="schedule">
+              <col class="time">
+              <col class="note">
+            </colgroup>
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>收件人</th>
+                <th>主题</th>
+                <th>正文</th>
+                <th>附件</th>
+                <th>定时</th>
+                <th>发送时间</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody id="taskRows">
+              <tr class="is-selected" data-state="ready" data-subject="预算执行情况传达书 - 财务部" data-to="财务部 / 12 人" data-body="预算执行情况传达书.md" data-attach="2 个附件" data-time="未设置" data-issue="全部校验通过">
+                <td><span class="tag ready">可保存</span></td>
+                <td>财务部 / 12 人</td>
+                <td>预算执行情况传达书</td>
+                <td>预算执行情况传达书.md</td>
+                <td>2 个</td>
+                <td>否</td>
+                <td>未设置</td>
+                <td>全部校验通过</td>
+              </tr>
+              <tr data-state="issue" data-subject="预算执行情况传达书 - 技术研发中心" data-to="技术研发中心 / 8 人" data-body="预算执行情况传达书.md" data-attach="无" data-time="未设置" data-issue="正文图片 period_expense_cumulative.png 缺失">
+                <td><span class="tag issue">需修正</span></td>
+                <td>技术研发中心 / 8 人</td>
+                <td>预算执行情况传达书</td>
+                <td>预算执行情况传达书.md</td>
+                <td>无</td>
+                <td>否</td>
+                <td>未设置</td>
+                <td>正文图片 period_expense_cumulative.png 缺失</td>
+              </tr>
+              <tr data-state="ready" data-subject="预算执行情况传达书 - 项目管理中心" data-to="项目管理中心 / 16 人" data-body="预算执行情况传达书.md" data-attach="3 个附件" data-time="未设置" data-issue="全部校验通过">
+                <td><span class="tag ready">可保存</span></td>
+                <td>项目管理中心 / 16 人</td>
+                <td>预算执行情况传达书</td>
+                <td>预算执行情况传达书.md</td>
+                <td>3 个</td>
+                <td>否</td>
+                <td>未设置</td>
+                <td>全部校验通过</td>
+              </tr>
+              <tr data-state="draft" data-subject="预算执行情况传达书 - 服务业一部" data-to="服务业一部 / 9 人" data-body="预算执行情况传达书.md" data-attach="1 个附件" data-time="未设置" data-issue="草稿箱已保存，等待人工微调">
+                <td><span class="tag draft">已保存</span></td>
+                <td>服务业一部 / 9 人</td>
+                <td>预算执行情况传达书</td>
+                <td>预算执行情况传达书.md</td>
+                <td>1 个</td>
+                <td>否</td>
+                <td>未设置</td>
+                <td>草稿箱已保存，等待人工微调</td>
+              </tr>
+              <tr data-state="queue" data-subject="预算执行情况传达书 - 项目交付中心" data-to="项目交付中心 / 23 人" data-body="预算执行情况传达书.md" data-attach="2 个附件" data-time="2026-06-02 20:30" data-issue="已加入定时队列">
+                <td><span class="tag queue">已入队</span></td>
+                <td>项目交付中心 / 23 人</td>
+                <td>预算执行情况传达书</td>
+                <td>预算执行情况传达书.md</td>
+                <td>2 个</td>
+                <td>是</td>
+                <td>2026-06-02 20:30</td>
+                <td>等待托盘调度</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="splitter" id="splitter" aria-hidden="true"></div>
+
+      <aside class="panel review-panel" aria-label="草稿复核">
+        <div class="panel-header">
+          <div class="panel-title">
+            <h2 id="detailSubject">预算执行情况传达书 - 财务部</h2>
+            <p class="meta" id="detailRecipient">财务部 / 12 人</p>
+          </div>
+          <span class="tag ready" id="detailStatus">可保存</span>
+        </div>
+
+        <div class="review-body">
+          <div class="field-grid">
+            <div class="field-row"><span>正文</span><strong id="detailBody">预算执行情况传达书.md</strong></div>
+            <div class="field-row"><span>附件</span><strong id="detailAttach">2 个附件</strong></div>
+            <div class="field-row"><span>发送时间</span><strong id="detailTime">未设置</strong></div>
+            <div class="field-row"><span>说明</span><strong id="detailIssue">全部校验通过</strong></div>
+          </div>
+
+          <div class="check-list">
+            <div class="check-item"><span>收件人与抄送</span><span class="tag ready">通过</span></div>
+            <div class="check-item"><span>Markdown 与图片</span><span class="tag ready" id="markdownCheck">通过</span></div>
+            <div class="check-item"><span>附件路径</span><span class="tag ready" id="attachmentCheck">通过</span></div>
+          </div>
+
+          <div class="mail-preview">
+            <div class="mail-head">
+              <strong id="previewSubject">预算执行情况传达书 - 财务部</strong>
+              <span class="muted">发件人 finance@company.com</span>
+              <span class="muted" id="previewTo">收件人 财务部 / 12 人</span>
+            </div>
+            <div class="mail-body">
+              <p>总：晚上好，以下为本月预算执行情况，请查收。</p>
+              <div class="mini-chart">
+                <div class="mini-card"><span>期间费用</span><strong>83.4%</strong></div>
+                <div class="mini-card"><span>项目成本</span><strong>76.1%</strong></div>
+                <div class="mini-card"><span>待复核项</span><strong>3</strong></div>
+              </div>
+              <p class="muted">预览区域默认更大，右侧面板可通过中间分隔条调整宽度。</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="review-actions">
+          <div class="button-row">
+            <button class="btn primary" type="button" data-toast="已保存 8 封邮件到草稿箱">
+              <i data-lucide="save" class="icon" aria-hidden="true"></i>
+              保存草稿
+            </button>
+            <button class="btn" type="button" data-toast="预览窗口已打开">
+              <i data-lucide="eye" class="icon" aria-hidden="true"></i>
+              预览
+            </button>
+            <button class="btn" type="button" data-toast="已加入定时队列">
+              <i data-lucide="clock-3" class="icon" aria-hidden="true"></i>
+              加入队列
+            </button>
+            <button class="btn danger" type="button" data-toast="发送前复核面板已打开">
+              <i data-lucide="send" class="icon" aria-hidden="true"></i>
+              立即发送
+            </button>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="runbar" aria-label="运行状态">
+      <div class="run-left">
+        <span class="dot"></span>
+        <span>任务包：预算执行通知</span>
+        <span>SMTP：已连接</span>
+        <span>可保存草稿：36</span>
+        <span>需修正：5</span>
+        <span>最近输出：runs\20260602_104200</span>
+      </div>
+      <div class="button-row">
+        <button class="btn"><i data-lucide="rotate-ccw" class="icon" aria-hidden="true"></i>重试失败项</button>
+        <button class="btn"><i data-lucide="history" class="icon" aria-hidden="true"></i>运行历史</button>
+      </div>
+    </section>
+  </main>
+
+  <div class="modal" id="helpModal" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+    <section class="dialog-panel">
+      <header class="dialog-header">
+        <div>
+          <h2 id="helpTitle">操作说明</h2>
+          <p class="muted">README_操作说明.md</p>
+        </div>
+        <button class="btn ghost" type="button" data-close="helpModal"><i data-lucide="x" class="icon" aria-hidden="true"></i>关闭</button>
+      </header>
+      <article class="doc-preview">
+        <h3>推荐操作流</h3>
+        <ol>
+          <li>连接 SMTP，并确认 IMAP 草稿箱可用。</li>
+          <li>下载或导入任务包，维护 <code>tasks.xlsx</code>。</li>
+          <li>回到工作台重新加载任务包。</li>
+          <li>筛选可保存草稿任务，逐条复核邮件预览。</li>
+          <li>点击保存草稿，再到邮箱草稿箱人工微调。</li>
+        </ol>
+        <h3>常见状态</h3>
+        <p><strong>可保存</strong> 表示收件人、Markdown、附件路径已通过校验。<strong>需修正</strong> 表示任务不能进入草稿保存或发送流程。</p>
+        <h3>定时队列</h3>
+        <p>定时任务依赖本机程序和托盘常驻。彻底退出程序后，未到点任务不会继续发送。</p>
+      </article>
+      <footer class="dialog-actions">
+        <button class="btn"><i data-lucide="folder-open" class="icon" aria-hidden="true"></i>打开文件位置</button>
+        <button class="btn"><i data-lucide="external-link" class="icon" aria-hidden="true"></i>外部打开</button>
+        <button class="btn primary" type="button" data-close="helpModal">关闭</button>
+      </footer>
+    </section>
+  </div>
+
+  <div class="modal" id="connectionModal" role="dialog" aria-modal="true" aria-labelledby="connectionTitle">
+    <section class="dialog-panel" style="width:min(520px, calc(100vw - 32px)); max-height:520px;">
+      <header class="dialog-header">
+        <div>
+          <h2 id="connectionTitle">连接设置</h2>
+          <p class="muted">SMTP 授权码连接成功后自动加密保存。</p>
+        </div>
+        <button class="btn ghost" type="button" data-close="connectionModal"><i data-lucide="x" class="icon" aria-hidden="true"></i>关闭</button>
+      </header>
+      <div class="doc-preview">
+        <label class="field-row"><span>发件邮箱</span><input value="finance@company.com"></label>
+        <label class="field-row"><span>SMTP 授权码</span><input type="password" placeholder="留空沿用已保存授权码"></label>
+        <label class="field-row"><span>服务器</span><strong>smtp.qiye.aliyun.com:465 / SSL</strong></label>
+      </div>
+      <footer class="dialog-actions">
+        <button class="btn" type="button" data-close="connectionModal">取消</button>
+        <button class="btn primary" type="button" data-toast="SMTP 连接测试已开始" data-close="connectionModal">连接并测试</button>
+      </footer>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite">
+    <i data-lucide="check-circle-2" class="icon" aria-hidden="true"></i>
+    <span id="toastText"></span>
+  </div>
+
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script>
+    const rows = Array.from(document.querySelectorAll('#taskRows tr'));
+    const chips = Array.from(document.querySelectorAll('[data-filter]'));
+    const search = document.querySelector('#taskSearch');
+    const toast = document.querySelector('#toast');
+    const toastText = document.querySelector('#toastText');
+    const splitter = document.querySelector('#splitter');
+    const workspace = document.querySelector('#workspace');
+    let toastTimer;
+    let dragging = false;
+
+    function refreshIcons() {
+      if (window.lucide) {
+        window.lucide.createIcons();
+      }
+    }
+
+    function showToast(message) {
+      toastText.textContent = message;
+      toast.classList.add('is-visible');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove('is-visible'), 2200);
+      refreshIcons();
+    }
+
+    function setDetail(row) {
+      rows.forEach(item => item.classList.toggle('is-selected', item === row));
+      const state = row.dataset.state;
+      document.querySelector('#detailSubject').textContent = row.dataset.subject;
+      document.querySelector('#detailRecipient').textContent = row.dataset.to;
+      document.querySelector('#detailBody').textContent = row.dataset.body;
+      document.querySelector('#detailAttach').textContent = row.dataset.attach;
+      document.querySelector('#detailTime').textContent = row.dataset.time;
+      document.querySelector('#detailIssue').textContent = row.dataset.issue;
+      document.querySelector('#previewSubject').textContent = row.dataset.subject;
+      document.querySelector('#previewTo').textContent = `收件人 ${row.dataset.to}`;
+      const status = document.querySelector('#detailStatus');
+      status.className = `tag ${state === 'ready' ? 'ready' : state === 'issue' ? 'issue' : state === 'draft' ? 'draft' : state === 'queue' ? 'queue' : 'neutral'}`;
+      status.textContent = state === 'ready' ? '可保存' : state === 'issue' ? '需修正' : state === 'draft' ? '已保存' : state === 'queue' ? '已入队' : '状态';
+      document.querySelector('#markdownCheck').className = `tag ${state === 'issue' && row.dataset.issue.includes('图片') ? 'issue' : 'ready'}`;
+      document.querySelector('#markdownCheck').textContent = state === 'issue' && row.dataset.issue.includes('图片') ? '异常' : '通过';
+      document.querySelector('#attachmentCheck').className = `tag ${state === 'issue' && row.dataset.issue.includes('附件') ? 'issue' : 'ready'}`;
+      document.querySelector('#attachmentCheck').textContent = state === 'issue' && row.dataset.issue.includes('附件') ? '异常' : '通过';
+    }
+
+    function applyFilter() {
+      const active = document.querySelector('.chip.is-active')?.dataset.filter || 'all';
+      const query = search.value.trim().toLowerCase();
+      rows.forEach(row => {
+        const stateMatch = active === 'all' || row.dataset.state === active;
+        const textMatch = row.textContent.toLowerCase().includes(query);
+        row.hidden = !(stateMatch && textMatch);
+      });
+    }
+
+    rows.forEach(row => row.addEventListener('click', () => setDetail(row)));
+    chips.forEach(chip => chip.addEventListener('click', () => {
+      chips.forEach(item => item.classList.toggle('is-active', item === chip));
+      applyFilter();
+    }));
+    search.addEventListener('input', applyFilter);
+
+    document.querySelectorAll('[data-toast]').forEach(button => {
+      button.addEventListener('click', () => showToast(button.dataset.toast));
+    });
+    document.querySelectorAll('[data-modal]').forEach(button => {
+      button.addEventListener('click', () => document.querySelector(`#${button.dataset.modal}`).classList.add('is-open'));
+    });
+    document.querySelectorAll('[data-close]').forEach(button => {
+      button.addEventListener('click', () => document.querySelector(`#${button.dataset.close}`).classList.remove('is-open'));
+    });
+    document.querySelectorAll('.modal').forEach(modal => {
+      modal.addEventListener('click', event => {
+        if (event.target === modal) {
+          modal.classList.remove('is-open');
+        }
+      });
+    });
+
+    splitter.addEventListener('pointerdown', event => {
+      dragging = true;
+      document.body.style.userSelect = 'none';
+      event.preventDefault();
+    });
+    window.addEventListener('pointermove', event => {
+      if (!dragging) return;
+      const rect = workspace.getBoundingClientRect();
+      const left = Math.min(Math.max(event.clientX - rect.left, 520), rect.width - 430);
+      const right = rect.width - left - 12;
+      workspace.style.gridTemplateColumns = `${left}px 12px ${right}px`;
+    });
+    window.addEventListener('pointerup', () => {
+      dragging = false;
+      document.body.style.userSelect = '';
+    });
+
+    refreshIcons();
+  </script>
+</body>
+</html>
