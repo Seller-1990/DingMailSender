@@ -8,16 +8,17 @@ from pathlib import Path
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..paths import packages_dir, program_dir, runs_dir
+from ..task_clone import clone_task
 from ..task_models import MailTask
 from ..task_package import (
     PACKAGE_README_FILENAME,
     TASKS_FILENAME,
-    clone_task,
-    create_template_package,
     ensure_unique_task_ids,
     load_tasks_from_package,
     save_tasks_to_package,
 )
+from ..task_template import create_template_package
+from ..task_status import TaskStatus
 from .dialogs import MarkdownPreviewDialog, PreviewDialog, RunHistoryDialog, TaskEditorDialog
 from .main_support import STATUS_ROW_COLORS, UiActionState, now_stamp
 from .theme import status_tone
@@ -34,6 +35,8 @@ class MainTaskMixin:
             raise ValueError(f"任务包目录必须位于 {home} 下。请先把任务包放进 `packages` 目录。")
 
     def _download_template_package(self) -> None:
+        if self._delivery_is_busy(title="请稍候", message="当前正在发送或保存草稿，请完成后再创建任务包。"):
+            return
         name, ok = QtWidgets.QInputDialog.getText(
             self,
             "下载任务包模板",
@@ -60,6 +63,8 @@ class MainTaskMixin:
         )
 
     def _import_package(self) -> None:
+        if self._delivery_is_busy(title="请稍候", message="当前正在发送或保存草稿，请完成后再导入任务包。"):
+            return
         selected = QtWidgets.QFileDialog.getExistingDirectory(self, "选择任务包目录", str(self._package_root()))
         if not selected:
             return
@@ -72,6 +77,8 @@ class MainTaskMixin:
             self._show_error_dialog("导入失败", f"导入任务包失败：{exc}")
 
     def _reload_package(self) -> None:
+        if self._delivery_is_busy(title="请稍候", message="当前正在发送或保存草稿，请完成后再重新加载任务包。"):
+            return
         if not self._package_dir:
             QtWidgets.QMessageBox.information(self, "未导入", "请先导入任务包目录。")
             return
@@ -245,17 +252,18 @@ class MainTaskMixin:
             return
         dialog = PreviewDialog(tasks=self._tasks, start_index=row, package_dir=self._package_dir, parent=self)
         dialog.exec()
-        self._tasks[row].last_previewed_at = datetime.now().replace(microsecond=0)
+        self._runtime.mark_previewed(self._tasks[row], datetime.now().replace(microsecond=0))
         self._refresh_task_table()
         self._refresh_ui_state()
 
     def _task_table_values(self, task: MailTask) -> list[str]:
         attachment_count = task.attachment_count()
-        issue_text = task.error_message or task.last_send_result or task.note
+        state = self._runtime.state_for(task)
+        issue_text = state.error_message or state.last_result or task.note
         schedule_text = task.scheduled_at.strftime("%Y-%m-%d %H:%M:%S") if task.scheduled_at else ""
         markdown_display = Path(task.markdown_path).name if task.markdown_path else "未填写"
         return [
-            task.status,
+            state.status.label,
             "; ".join(task.to_recipients),
             task.subject,
             markdown_display,
@@ -266,6 +274,7 @@ class MainTaskMixin:
         ]
 
     def _task_tooltip(self, task: MailTask) -> str:
+        state = self._runtime.state_for(task)
         return "\n".join(
             x
             for x in [
@@ -276,8 +285,8 @@ class MainTaskMixin:
                 f"Markdown：{task.markdown_path}" if task.markdown_path else "",
                 f"附件：{'; '.join(task.attachment_paths)}" if task.attachment_paths else "",
                 f"备注：{task.note}" if task.note else "",
-                f"最近结果：{task.last_send_result}" if task.last_send_result else "",
-                f"说明：{task.error_message}" if task.error_message else "",
+                f"最近结果：{state.last_result}" if state.last_result else "",
+                f"说明：{state.error_message}" if state.error_message else "",
             ]
             if x
         )
@@ -301,7 +310,7 @@ class MainTaskMixin:
             item.setBackground(QtGui.QBrush())
 
     def _refresh_task_table_row(self, row: int, task: MailTask) -> None:
-        tone = status_tone(task.status)
+        tone = status_tone(self._runtime.status_for(task))
         row_color = QtGui.QColor(STATUS_ROW_COLORS.get(tone, STATUS_ROW_COLORS["neutral"]))
         tooltip = self._task_tooltip(task)
         for col, value in enumerate(self._task_table_values(task)):
@@ -326,7 +335,10 @@ class MainTaskMixin:
         self._refresh_metrics()
 
     def _refresh_package_action_buttons(self, has_package: bool) -> None:
-        self._reload_package_btn.setEnabled(has_package)
+        is_busy = self._send_worker is not None or self._draft_worker is not None
+        self._download_package_btn.setEnabled(not is_busy)
+        self._import_package_btn.setEnabled(not is_busy)
+        self._reload_package_btn.setEnabled(has_package and not is_busy)
         self._open_package_btn.setEnabled(has_package)
         self._open_tasks_btn.setEnabled(has_package)
         self._open_readme_btn.setEnabled(has_package)
@@ -340,7 +352,9 @@ class MainTaskMixin:
         self._save_drafts_btn.setEnabled(state.can_send and state.has_selection)
         self._send_now_btn.setEnabled(state.can_send and state.has_selection)
         self._queue_btn.setEnabled(state.can_send and state.has_selection)
-        self._retry_btn.setEnabled(state.can_send and any(task.status == "发送失败" for task in self._tasks))
+        self._retry_btn.setEnabled(
+            state.can_send and any(self._runtime.status_for(task) == TaskStatus.SEND_FAILED for task in self._tasks)
+        )
         self._open_last_run_btn.setEnabled(True)
 
     def _refresh_package_summary(self) -> None:
@@ -355,11 +369,11 @@ class MainTaskMixin:
 
     def _refresh_status_line(self, selected_count: int, has_selection: bool) -> None:
         enabled_tasks = [task for task in self._tasks if task.enabled]
-        ready = sum(1 for task in self._tasks if task.status == "可发送")
+        ready = sum(1 for task in self._tasks if self._runtime.status_for(task) == TaskStatus.READY)
         queued = len(self._runtime.queued_task_ids)
-        failed = sum(1 for task in self._tasks if task.status == "发送失败")
-        issues = sum(1 for task in self._tasks if task.status == "校验失败")
-        drafts = sum(1 for task in self._tasks if task.status == "草稿已保存")
+        failed = sum(1 for task in self._tasks if self._runtime.status_for(task) == TaskStatus.SEND_FAILED)
+        issues = sum(1 for task in self._tasks if self._runtime.status_for(task) == TaskStatus.VALIDATION_FAILED)
+        drafts = sum(1 for task in self._tasks if self._runtime.status_for(task) == TaskStatus.DRAFT_SAVED)
         selected_desc = f"当前选中：{selected_count} 条" if has_selection else "当前未选中任务"
         last_run = str(self._last_run_dir) if self._last_run_dir else "暂无"
         package_name = self._package_dir.name if self._package_dir else "未导入"

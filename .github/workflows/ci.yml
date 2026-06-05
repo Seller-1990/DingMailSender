@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          python -m pip install -r requirements.txt -c constraints.txt
+
+      - name: Repository hygiene
+        shell: pwsh
+        run: .\scripts\check_repo_hygiene.ps1
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests
+
+      - name: Compile check
+        run: python -m compileall src dingmail_gui.py tests
+
+      - name: Build executable
+        shell: pwsh
+        run: .\build_exe.ps1
+
+      - name: Verify artifact
+        shell: pwsh
+        run: |
+          if (-not (Test-Path .\release\DingMailSender.exe)) { throw "Missing release\DingMailSender.exe" }
+          if (-not (Test-Path .\release\DingMailSender.exe.sha256)) { throw "Missing SHA256 checksum" }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DingMailSender-windows
+          path: |
+            release/DingMailSender.exe
+            release/DingMailSender.exe.sha256

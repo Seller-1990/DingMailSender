@@ -2,24 +2,29 @@ from __future__ import annotations
 
 from PySide6 import QtWidgets
 
+from ..task_status import TaskStatus
 
 STATUS_TONES = {
-    "已停用": "neutral",
-    "未校验": "neutral",
-    "校验失败": "danger",
-    "已加入定时队列": "warning",
-    "发送中": "info",
-    "草稿保存中": "info",
-    "发送成功": "success",
-    "发送失败": "danger",
-    "草稿已保存": "draft",
-    "草稿保存失败": "danger",
-    "可发送": "success",
+    TaskStatus.DISABLED: "neutral",
+    TaskStatus.UNCHECKED: "neutral",
+    TaskStatus.VALIDATION_FAILED: "danger",
+    TaskStatus.QUEUED: "warning",
+    TaskStatus.SENDING: "info",
+    TaskStatus.DRAFTING: "info",
+    TaskStatus.SENT: "success",
+    TaskStatus.SEND_FAILED: "danger",
+    TaskStatus.DRAFT_SAVED: "draft",
+    TaskStatus.DRAFT_FAILED: "danger",
+    TaskStatus.READY: "success",
 }
 
 
-def status_tone(status: str) -> str:
-    return STATUS_TONES.get(status, "neutral")
+def status_tone(status: TaskStatus | str) -> str:
+    try:
+        normalized = status if isinstance(status, TaskStatus) else TaskStatus(status)
+    except ValueError:
+        return "neutral"
+    return STATUS_TONES.get(normalized, "neutral")
 
 
 def repolish(widget: QtWidgets.QWidget) -> None:

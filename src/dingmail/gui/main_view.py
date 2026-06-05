@@ -5,6 +5,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..model import SmtpConfig
 from ..task_models import MailTask
 from ..task_service import render_task_preview_html
+from ..task_status import TaskStatus
 from .main_support import EMAIL_RE, TASK_FILTERS, error_summary
 from .theme import status_tone
 from .widgets import set_button_variant
@@ -42,18 +43,19 @@ class MainViewMixin:
         return self._tasks[row] if 0 <= row < len(self._tasks) else None
 
     def _task_matches_filter(self, task: MailTask) -> bool:
+        status = self._runtime.status_for(task)
         if self._active_filter == "all":
             return True
         if self._active_filter == "ready":
-            return task.status == "可发送"
+            return status == TaskStatus.READY
         if self._active_filter == "issue":
-            return task.status == "校验失败"
+            return status == TaskStatus.VALIDATION_FAILED
         if self._active_filter == "draft":
-            return task.status == "草稿已保存"
+            return status == TaskStatus.DRAFT_SAVED
         if self._active_filter == "queued":
-            return task.status == "已加入定时队列"
+            return status == TaskStatus.QUEUED
         if self._active_filter == "failed":
-            return task.status in {"发送失败", "草稿保存失败"}
+            return status in {TaskStatus.SEND_FAILED, TaskStatus.DRAFT_FAILED}
         return True
 
     def _task_matches_search(self, task: MailTask) -> bool:
@@ -67,8 +69,8 @@ class MainViewMixin:
                 task.subject,
                 task.markdown_path,
                 task.note,
-                task.error_message,
-                task.last_send_result,
+                self._runtime.error_for(task),
+                self._runtime.last_result_for(task),
             ]
         ).lower()
         return query in haystack
@@ -91,9 +93,9 @@ class MainViewMixin:
 
     def _refresh_metrics(self) -> None:
         enabled_tasks = [task for task in self._tasks if task.enabled]
-        ready = sum(1 for task in self._tasks if task.status == "可发送")
-        issues = sum(1 for task in self._tasks if task.status == "校验失败")
-        drafts = sum(1 for task in self._tasks if task.status == "草稿已保存")
+        ready = sum(1 for task in self._tasks if self._runtime.status_for(task) == TaskStatus.READY)
+        issues = sum(1 for task in self._tasks if self._runtime.status_for(task) == TaskStatus.VALIDATION_FAILED)
+        drafts = sum(1 for task in self._tasks if self._runtime.status_for(task) == TaskStatus.DRAFT_SAVED)
         queued = len(self._runtime.queued_task_ids)
         updates = {
             "enabled": (len(enabled_tasks), "当前任务包"),
@@ -123,8 +125,9 @@ class MainViewMixin:
 
         scheduled_text = task.scheduled_at.strftime("%Y-%m-%d %H:%M:%S") if task.scheduled_at else "未设置"
         attachment_text = "; ".join(task.attachment_paths) if task.attachment_paths else "无附件"
-        issue_text = task.error_message or task.last_send_result or task.note or "当前任务没有错误提示。"
-        self._detail_status_tag.set_status(task.status, status_tone(task.status))
+        state = self._runtime.state_for(task)
+        issue_text = state.error_message or state.last_result or task.note or "当前任务没有错误提示。"
+        self._detail_status_tag.set_status(state.status.label, status_tone(state.status))
         self._detail_title_label.setText(task.subject or "未填写主题")
         self._detail_to_label.setText(f"收件人：{'; '.join(task.to_recipients) or '未填写'}")
         self._detail_cc_label.setText(f"抄送人：{'; '.join(task.cc_recipients) or '无'}")
@@ -258,6 +261,7 @@ class MainViewMixin:
         save_warning = ""
         try:
             saved_path = self._save_connection_profile(from_email=from_email, smtp_password=password)
+            self._mark_connection_profile_saved(saved_path)
             location_note = f"\n已保存登录信息：{saved_path}"
         except Exception as exc:
             save_warning = (

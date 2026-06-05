@@ -30,6 +30,7 @@ Desktop.ini
 .DS_Store
 
 # Runtime output
+packages/
 runs/
 .playwright-mcp/
 dingmail-workbench-*.png

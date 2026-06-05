@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import re
@@ -8,14 +9,24 @@ from ..task_delivery import SendTasksResult
 from ..task_models import MailTask
 from ..task_package import resolve_user_path
 from ..task_service import validate_task
+from ..task_status import TaskStatus
 
 EMAIL_RE = re.compile(r"^[^@\s;]+@[^@\s]+\.[^@\s]+$")
+
+
+@dataclass
+class TaskRuntimeState:
+    status: TaskStatus = TaskStatus.UNCHECKED
+    error_message: str = ""
+    last_previewed_at: datetime | None = None
+    last_result: str = ""
 
 
 class TaskRuntimeController:
     def __init__(self) -> None:
         self._package_dir: Path | None = None
         self._validation_cache: dict[str, tuple[tuple[object, ...], list[str]]] = {}
+        self._states: dict[str, TaskRuntimeState] = {}
         self.queued_task_ids: set[str] = set()
         self.sending_task_ids: set[str] = set()
         self.drafting_task_ids: set[str] = set()
@@ -35,8 +46,7 @@ class TaskRuntimeController:
         self.queued_task_ids.clear()
         self.sending_task_ids.clear()
         self.drafting_task_ids.clear()
-        for task in tasks:
-            self.reset_runtime_fields(task)
+        self._states = {task.task_id: TaskRuntimeState() for task in tasks}
 
         for task in tasks:
             if task.task_id not in previous_queued_ids or not task.enabled or not task.schedule_enabled:
@@ -49,11 +59,34 @@ class TaskRuntimeController:
         self.queued_task_ids.intersection_update(valid_ids)
         self.sending_task_ids.intersection_update(valid_ids)
         self.drafting_task_ids.intersection_update(valid_ids)
+        self._states = {task_id: state for task_id, state in self._states.items() if task_id in valid_ids}
+        for task in tasks:
+            self._state_for_task_id(task.task_id)
 
     def reset_runtime_fields(self, task: MailTask) -> None:
-        task.status = "未校验"
-        task.error_message = ""
-        task.last_send_result = ""
+        self._states[task.task_id] = TaskRuntimeState()
+
+    def state_for(self, task: MailTask) -> TaskRuntimeState:
+        return self._state_for_task_id(task.task_id)
+
+    def status_for(self, task: MailTask) -> TaskStatus:
+        return self.state_for(task).status
+
+    def status_label_for(self, task: MailTask) -> str:
+        return self.status_for(task).label
+
+    def error_for(self, task: MailTask) -> str:
+        return self.state_for(task).error_message
+
+    def last_result_for(self, task: MailTask) -> str:
+        return self.state_for(task).last_result
+
+    def issue_text_for(self, task: MailTask) -> str:
+        state = self.state_for(task)
+        return state.error_message or state.last_result
+
+    def mark_previewed(self, task: MailTask, when: datetime) -> None:
+        self.state_for(task).last_previewed_at = when
 
     def validate_task(self, task: MailTask, *, check_schedule_time: bool) -> list[str]:
         if not self._package_dir:
@@ -96,43 +129,51 @@ class TaskRuntimeController:
         if not self._package_dir:
             return
         for task in tasks:
+            state = self.state_for(task)
             if not task.enabled:
-                task.status = "已停用"
-                task.error_message = ""
+                state.status = TaskStatus.DISABLED
+                state.error_message = ""
                 continue
             errors = self.validate_task(task, check_schedule_time=False)
             if errors:
-                task.status = "校验失败"
-                task.error_message = "\n".join(errors)
+                state.status = TaskStatus.VALIDATION_FAILED
+                state.error_message = "\n".join(errors)
                 continue
             if task.task_id in self.sending_task_ids:
-                task.status = "发送中"
+                state.status = TaskStatus.SENDING
                 continue
             if task.task_id in self.drafting_task_ids:
-                task.status = "草稿保存中"
+                state.status = TaskStatus.DRAFTING
                 continue
             if task.task_id in self.queued_task_ids and task.schedule_enabled:
-                task.status = "已加入定时队列"
-                task.error_message = ""
+                state.status = TaskStatus.QUEUED
+                state.error_message = ""
                 continue
-            if task.status in {"发送成功", "发送失败", "草稿已保存", "草稿保存失败"}:
+            if state.status in TaskStatus.terminal_statuses():
                 continue
-            task.status = "可发送"
-            task.error_message = ""
+            state.status = TaskStatus.READY
+            state.error_message = ""
 
     def mark_sending(self, tasks: list[MailTask]) -> None:
-        self.sending_task_ids.update(task.task_id for task in tasks)
+        for task in tasks:
+            self.sending_task_ids.add(task.task_id)
+            self._set_state(task, status=TaskStatus.SENDING, error_message="")
 
     def mark_drafting(self, tasks: list[MailTask]) -> None:
-        self.drafting_task_ids.update(task.task_id for task in tasks)
+        for task in tasks:
+            self.drafting_task_ids.add(task.task_id)
+            self._set_state(task, status=TaskStatus.DRAFTING, error_message="")
 
     def mark_send_worker_error(self, tasks: list[MailTask], error_text: str) -> None:
         for task in tasks:
             if task.task_id not in self.sending_task_ids:
                 continue
-            task.status = "发送失败"
-            task.error_message = error_text
-            task.last_send_result = "发送失败"
+            self._set_state(
+                task,
+                status=TaskStatus.SEND_FAILED,
+                error_message=error_text,
+                last_result=TaskStatus.SEND_FAILED.label,
+            )
             self.queued_task_ids.discard(task.task_id)
         self.sending_task_ids.clear()
 
@@ -140,9 +181,12 @@ class TaskRuntimeController:
         for task in tasks:
             if task.task_id not in self.drafting_task_ids:
                 continue
-            task.status = "草稿保存失败"
-            task.error_message = error_text
-            task.last_send_result = "草稿保存失败"
+            self._set_state(
+                task,
+                status=TaskStatus.DRAFT_FAILED,
+                error_message=error_text,
+                last_result=TaskStatus.DRAFT_FAILED.label,
+            )
         self.drafting_task_ids.clear()
 
     def apply_send_result(self, tasks: list[MailTask], result: SendTasksResult) -> tuple[int, int]:
@@ -154,13 +198,19 @@ class TaskRuntimeController:
             self.sending_task_ids.discard(task.task_id)
             self.queued_task_ids.discard(task.task_id)
             if outcome.status == "sent":
-                task.status = "发送成功"
-                task.error_message = ""
-                task.last_send_result = f"发送成功 {outcome.message_id or ''}".strip()
+                self._set_state(
+                    task,
+                    status=TaskStatus.SENT,
+                    error_message="",
+                    last_result=f"{TaskStatus.SENT.label} {outcome.message_id or ''}".strip(),
+                )
             else:
-                task.status = "发送失败"
-                task.error_message = outcome.error or "未知错误"
-                task.last_send_result = "发送失败"
+                self._set_state(
+                    task,
+                    status=TaskStatus.SEND_FAILED,
+                    error_message=outcome.error or "未知错误",
+                    last_result=TaskStatus.SEND_FAILED.label,
+                )
 
         success_count = sum(1 for outcome in result.outcomes if outcome.status == "sent")
         return success_count, len(result.outcomes) - success_count
@@ -173,13 +223,19 @@ class TaskRuntimeController:
                 continue
             self.drafting_task_ids.discard(task.task_id)
             if outcome.status == "draft_saved":
-                task.status = "草稿已保存"
-                task.error_message = ""
-                task.last_send_result = f"草稿已保存 {outcome.message_id or ''}".strip()
+                self._set_state(
+                    task,
+                    status=TaskStatus.DRAFT_SAVED,
+                    error_message="",
+                    last_result=f"{TaskStatus.DRAFT_SAVED.label} {outcome.message_id or ''}".strip(),
+                )
             else:
-                task.status = "草稿保存失败"
-                task.error_message = outcome.error or "未知错误"
-                task.last_send_result = "草稿保存失败"
+                self._set_state(
+                    task,
+                    status=TaskStatus.DRAFT_FAILED,
+                    error_message=outcome.error or "未知错误",
+                    last_result=TaskStatus.DRAFT_FAILED.label,
+                )
 
         success_count = sum(1 for outcome in result.outcomes if outcome.status == "draft_saved")
         return success_count, len(result.outcomes) - success_count
@@ -196,8 +252,7 @@ class TaskRuntimeController:
                 errors.append(f"{task.subject or task.task_id}：{'；'.join(task_errors)}")
                 continue
             self.queued_task_ids.add(task.task_id)
-            task.status = "已加入定时队列"
-            task.error_message = ""
+            self._set_state(task, status=TaskStatus.QUEUED, error_message="")
             queued += 1
         return queued, errors
 
@@ -208,18 +263,24 @@ class TaskRuntimeController:
             if task.task_id not in self.queued_task_ids:
                 continue
             if not task.schedule_enabled or task.scheduled_at is None:
-                task.status = "发送失败"
-                task.error_message = "任务已在定时队列中，但缺少合法发送时间"
-                task.last_send_result = "发送失败"
+                self._set_state(
+                    task,
+                    status=TaskStatus.SEND_FAILED,
+                    error_message="任务已在定时队列中，但缺少合法发送时间",
+                    last_result=TaskStatus.SEND_FAILED.label,
+                )
                 self.queued_task_ids.discard(task.task_id)
                 continue
             if task.scheduled_at > current_time:
                 continue
             errors = self.validate_task(task, check_schedule_time=False)
             if errors:
-                task.status = "发送失败"
-                task.error_message = "\n".join(errors)
-                task.last_send_result = "发送失败"
+                self._set_state(
+                    task,
+                    status=TaskStatus.SEND_FAILED,
+                    error_message="\n".join(errors),
+                    last_result=TaskStatus.SEND_FAILED.label,
+                )
                 self.queued_task_ids.discard(task.task_id)
                 continue
             due_tasks.append(task)
@@ -251,3 +312,21 @@ class TaskRuntimeController:
         except FileNotFoundError:
             return ("missing", str(resolved))
         return ("file", str(resolved), stat.st_mtime_ns, stat.st_size)
+
+    def _state_for_task_id(self, task_id: str) -> TaskRuntimeState:
+        return self._states.setdefault(task_id, TaskRuntimeState())
+
+    def _set_state(
+        self,
+        task: MailTask,
+        *,
+        status: TaskStatus,
+        error_message: str | None = None,
+        last_result: str | None = None,
+    ) -> None:
+        state = self.state_for(task)
+        state.status = status
+        if error_message is not None:
+            state.error_message = error_message
+        if last_result is not None:
+            state.last_result = last_result

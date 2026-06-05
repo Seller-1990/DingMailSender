@@ -66,6 +66,8 @@ class MainUiMixin:
         self._account_label.setObjectName("MutedLabel")
         self._server_label = label_value("")
         self._server_label.setObjectName("MutedLabel")
+        self._profile_source_label = label_value("")
+        self._profile_source_label.setObjectName("MutedLabel")
         self._smtp_status_badge = StatusTag("未连接", variant="neutral")
         self._connect_btn = make_button("连接设置")
         self._connect_btn.clicked.connect(self._show_connection_settings)
@@ -81,6 +83,7 @@ class MainUiMixin:
         connection_box.addLayout(connection_row)
         connection_box.addWidget(self._account_label)
         connection_box.addWidget(self._server_label)
+        connection_box.addWidget(self._profile_source_label)
 
         layout.addLayout(title_box)
         layout.addWidget(self._package_label, 1)

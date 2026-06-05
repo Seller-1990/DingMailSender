@@ -13,6 +13,7 @@ from dingmail.connection_profile import (
     ConnectionProfile,
     ConnectionProfileLoadError,
     load_connection_profile,
+    load_connection_profile_with_metadata,
     save_connection_profile,
 )
 
@@ -58,6 +59,23 @@ class ConnectionProfileTests(unittest.TestCase):
             loaded = load_connection_profile(legacy_path)
             self.assertEqual("legacy@example.com", loaded.from_email)
             self.assertEqual("legacy-token", loaded.smtp_password)
+
+    def test_load_connection_profile_metadata_marks_legacy_plaintext_source(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dingmail_profile_") as tmp:
+            missing = Path(tmp) / "missing.json"
+            legacy_path = Path(tmp) / "legacy.json"
+            legacy_path.write_text(
+                '{"from_email":"legacy@example.com","password":"legacy-token"}',
+                encoding="utf-8",
+            )
+
+            result = load_connection_profile_with_metadata(missing, legacy_path)
+
+            self.assertEqual("legacy@example.com", result.profile.from_email)
+            self.assertEqual("legacy-token", result.profile.smtp_password)
+            self.assertEqual(legacy_path.resolve(), result.source_path)
+            self.assertTrue(result.is_legacy_source)
+            self.assertTrue(result.uses_plaintext_secret)
 
     def test_load_connection_profile_uses_next_candidate_when_primary_missing(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dingmail_profile_") as tmp:

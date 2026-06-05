@@ -18,11 +18,6 @@ class MailTask:
     scheduled_at: datetime | None = None
     note: str = ""
 
-    status: str = "未校验"
-    error_message: str = ""
-    last_previewed_at: datetime | None = None
-    last_send_result: str = ""
-
     def attachment_count(self) -> int:
         return len([x for x in self.attachment_paths if str(x).strip()])
 
@@ -35,4 +30,3 @@ class PackageLayout:
     assets_dir: str
     attachments_dir: str
     readme_file: str
-

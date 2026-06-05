@@ -1,43 +1,95 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+from typing import Callable
 
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from ..task_delivery import SendTasksResult
 from ..task_models import MailTask
+from ..task_status import TaskStatus
 from .main_support import error_summary
 from .workers import DraftWorkerConfig, SaveDraftsWorker, SendTasksWorker, SendWorkerConfig
 
 
+@dataclass(frozen=True)
+class DeliveryWorkerSpec:
+    worker: QtCore.QThread
+    worker_attr: str
+    apply_result: Callable[[SendTasksResult], None]
+    mark_error: Callable[[str], None]
+    error_title: str
+    error_prefix: str
+    after_ok: Callable[[SendTasksResult], None] | None = None
+
+
 class MainDeliveryMixin:
+    def _delivery_is_busy(self, *, title: str, message: str) -> bool:
+        if self._send_worker is None and self._draft_worker is None:
+            return False
+        QtWidgets.QMessageBox.information(self, title, message)
+        return True
+
+    def _start_delivery_worker(
+        self,
+        *,
+        spec: DeliveryWorkerSpec,
+    ) -> None:
+        setattr(self, spec.worker_attr, spec.worker)
+
+        def _clear_worker() -> None:
+            setattr(self, spec.worker_attr, None)
+
+        def _ok(result: object) -> None:
+            _clear_worker()
+            if not isinstance(result, SendTasksResult):
+                error_text = f"后台任务返回了异常结果类型：{type(result).__name__}"
+                spec.mark_error(error_text)
+                self._refresh_task_table()
+                self._refresh_ui_state()
+                self._show_error_dialog(spec.error_title, error_text)
+                return
+            spec.apply_result(result)
+            if spec.after_ok is not None:
+                spec.after_ok(result)
+
+        def _err(tb: str) -> None:
+            _clear_worker()
+            error_text = tb.strip()
+            spec.mark_error(error_text)
+            self._refresh_task_table()
+            self._refresh_ui_state()
+            self._show_error_dialog(spec.error_title, f"{spec.error_prefix}：{error_summary(tb)}", details=tb)
+
+        spec.worker.finished_ok.connect(_ok)
+        spec.worker.finished_err.connect(_err)
+        spec.worker.start()
+
     def _start_send(self, tasks: list[MailTask], *, queue_mode: bool) -> None:
         if not self._package_dir:
             return
-        if self._send_worker is not None or self._draft_worker is not None:
-            QtWidgets.QMessageBox.information(self, "正在发送", "当前已有发送任务在执行，请稍候。")
+        if self._delivery_is_busy(title="正在发送", message="当前已有发送任务在执行，请稍候。"):
             return
         if not tasks:
             QtWidgets.QMessageBox.information(self, "没有可发送任务", "请先选择或准备好可发送的任务。")
             return
 
-        self._runtime.mark_sending(tasks)
+        submitted_tasks = list(tasks)
+        submitted_package_dir = self._package_dir
+        self._runtime.mark_sending(submitted_tasks)
         self._refresh_task_table()
         self._refresh_ui_state()
 
         worker = SendTasksWorker(SendWorkerConfig(
-            tasks=tasks,
-            package_dir=self._package_dir,
+            tasks=submitted_tasks,
+            package_dir=submitted_package_dir,
             home_dir=self._home_dir,
             smtp_cfg=self._smtp_cfg,
             smtp_password=self._smtp_password,
         ))
-        self._send_worker = worker
-
-        def _ok(result: object) -> None:
-            assert isinstance(result, SendTasksResult)
-            self._send_worker = None
-            self._apply_send_result(result)
+        def _show_queue_notification(result: SendTasksResult) -> None:
             if self._tray is not None and queue_mode:
                 self._tray.showMessage(
                     "定时邮件已发送",
@@ -46,61 +98,95 @@ class MainDeliveryMixin:
                     4000,
                 )
 
-        def _err(tb: str) -> None:
-            self._send_worker = None
-            error_text = tb.strip()
-            self._runtime.mark_send_worker_error(self._tasks, error_text)
-            self._refresh_task_table()
-            self._refresh_ui_state()
-            self._show_error_dialog("发送失败", f"发送任务失败：{error_summary(tb)}", details=tb)
-
-        worker.finished_ok.connect(_ok)
-        worker.finished_err.connect(_err)
-        worker.start()
+        self._start_delivery_worker(
+            spec=DeliveryWorkerSpec(
+                worker=worker,
+                worker_attr="_send_worker",
+                apply_result=lambda result: self._apply_send_result(
+                    submitted_tasks,
+                    submitted_package_dir,
+                    result,
+                ),
+                mark_error=lambda error_text: self._mark_send_worker_error(
+                    submitted_tasks,
+                    submitted_package_dir,
+                    error_text,
+                ),
+                error_title="发送失败",
+                error_prefix="发送任务失败",
+                after_ok=_show_queue_notification,
+            )
+        )
 
     def _start_save_drafts(self, tasks: list[MailTask]) -> None:
         if not self._package_dir:
             return
-        if self._send_worker is not None or self._draft_worker is not None:
-            QtWidgets.QMessageBox.information(self, "请稍候", "当前已有发送/草稿任务在执行，请稍候。")
+        if self._delivery_is_busy(title="请稍候", message="当前已有发送/草稿任务在执行，请稍候。"):
             return
         if not tasks:
             QtWidgets.QMessageBox.information(self, "没有可保存任务", "请先选择或准备好可保存的任务。")
             return
 
-        self._runtime.mark_drafting(tasks)
+        submitted_tasks = list(tasks)
+        submitted_package_dir = self._package_dir
+        self._runtime.mark_drafting(submitted_tasks)
         self._refresh_task_table()
         self._refresh_ui_state()
 
         worker = SaveDraftsWorker(DraftWorkerConfig(
-            tasks=tasks,
-            package_dir=self._package_dir,
+            tasks=submitted_tasks,
+            package_dir=submitted_package_dir,
             home_dir=self._home_dir,
             imap_username=self._smtp_cfg.username.strip(),
             imap_password=self._smtp_password,
         ))
-        self._draft_worker = worker
+        self._start_delivery_worker(
+            spec=DeliveryWorkerSpec(
+                worker=worker,
+                worker_attr="_draft_worker",
+                apply_result=lambda result: self._apply_draft_result(
+                    submitted_tasks,
+                    submitted_package_dir,
+                    result,
+                ),
+                mark_error=lambda error_text: self._mark_draft_worker_error(
+                    submitted_tasks,
+                    submitted_package_dir,
+                    error_text,
+                ),
+                error_title="保存草稿失败",
+                error_prefix="保存草稿失败",
+            )
+        )
 
-        def _ok(result: object) -> None:
-            assert isinstance(result, SendTasksResult)
-            self._draft_worker = None
-            self._apply_draft_result(result)
+    def _delivery_result_matches_current_tasks(self, tasks: list[MailTask], package_dir: Path) -> bool:
+        if self._package_dir is None or self._package_dir.resolve() != package_dir.resolve():
+            return False
+        current_task_objects = {id(task) for task in self._tasks}
+        return all(id(task) in current_task_objects for task in tasks)
 
-        def _err(tb: str) -> None:
-            self._draft_worker = None
-            error_text = tb.strip()
-            self._runtime.mark_draft_worker_error(self._tasks, error_text)
-            self._refresh_task_table()
-            self._refresh_ui_state()
-            self._show_error_dialog("保存草稿失败", f"保存草稿失败：{error_summary(tb)}", details=tb)
+    def _send_result_counts(self, result: SendTasksResult) -> tuple[int, int]:
+        sent_count = sum(1 for outcome in result.outcomes if outcome.status == "sent")
+        return sent_count, len(result.outcomes) - sent_count
 
-        worker.finished_ok.connect(_ok)
-        worker.finished_err.connect(_err)
-        worker.start()
+    def _draft_result_counts(self, result: SendTasksResult) -> tuple[int, int]:
+        ok_count = sum(1 for outcome in result.outcomes if outcome.status == "draft_saved")
+        return ok_count, len(result.outcomes) - ok_count
 
-    def _apply_send_result(self, result: SendTasksResult) -> None:
+    def _mark_send_worker_error(self, tasks: list[MailTask], package_dir: Path, error_text: str) -> None:
+        if self._delivery_result_matches_current_tasks(tasks, package_dir):
+            self._runtime.mark_send_worker_error(tasks, error_text)
+
+    def _mark_draft_worker_error(self, tasks: list[MailTask], package_dir: Path, error_text: str) -> None:
+        if self._delivery_result_matches_current_tasks(tasks, package_dir):
+            self._runtime.mark_draft_worker_error(tasks, error_text)
+
+    def _apply_send_result(self, tasks: list[MailTask], package_dir: Path, result: SendTasksResult) -> None:
         self._last_run_dir = result.run_paths.run_dir
-        sent_count, failed_count = self._runtime.apply_send_result(self._tasks, result)
+        if self._delivery_result_matches_current_tasks(tasks, package_dir):
+            sent_count, failed_count = self._runtime.apply_send_result(tasks, result)
+        else:
+            sent_count, failed_count = self._send_result_counts(result)
         self._refresh_task_table()
         self._refresh_ui_state()
         QtWidgets.QMessageBox.information(
@@ -109,9 +195,12 @@ class MainDeliveryMixin:
             f"本次输出目录：{result.run_paths.run_dir}\n发送成功：{sent_count}\n发送失败：{failed_count}",
         )
 
-    def _apply_draft_result(self, result: SendTasksResult) -> None:
+    def _apply_draft_result(self, tasks: list[MailTask], package_dir: Path, result: SendTasksResult) -> None:
         self._last_run_dir = result.run_paths.run_dir
-        ok_count, fail_count = self._runtime.apply_draft_result(self._tasks, result)
+        if self._delivery_result_matches_current_tasks(tasks, package_dir):
+            ok_count, fail_count = self._runtime.apply_draft_result(tasks, result)
+        else:
+            ok_count, fail_count = self._draft_result_counts(result)
         self._refresh_task_table()
         self._refresh_ui_state()
         QtWidgets.QMessageBox.information(
@@ -186,7 +275,10 @@ class MainDeliveryMixin:
         QtWidgets.QMessageBox.information(self, "定时队列结果", message)
 
     def _retry_failed_tasks(self) -> None:
-        failed = [task for task in self._tasks if task.status == "发送失败" and task.enabled]
+        failed = [
+            task for task in self._tasks
+            if self._runtime.status_for(task) == TaskStatus.SEND_FAILED and task.enabled
+        ]
         if not failed:
             QtWidgets.QMessageBox.information(self, "无需重试", "当前没有可重试的失败任务。")
             return

@@ -17,10 +17,15 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from PySide6 import QtGui, QtWidgets
 
-from dingmail.connection_profile import ConnectionProfile
-from dingmail.gui.main import MainWindow, RunHistoryDialog
+from dingmail.connection_profile import ConnectionProfile, ConnectionProfileLoadResult
+from dingmail.gui.dialogs import RunHistoryDialog
+from dingmail.gui.main import MainWindow
+from dingmail.gui.main_delivery import DeliveryWorkerSpec
+from dingmail.run_store import RunPaths
+from dingmail.task_delivery import SendTasksResult, TaskDeliveryOutcome
 from dingmail.task_models import MailTask
 from dingmail.task_package import TASKS_FILENAME, TASKS_SHEET_NAME, load_tasks_from_package, save_tasks_to_package
+from dingmail.task_status import TaskStatus
 
 TASK_HEADERS = [
     "任务ID",
@@ -46,6 +51,28 @@ class _FakeTray:
         self.messages.append((title, message, icon, timeout))
 
 
+class _FakeSignal:
+    def __init__(self) -> None:
+        self._callbacks = []
+
+    def connect(self, callback) -> None:
+        self._callbacks.append(callback)
+
+    def emit(self, value) -> None:
+        for callback in list(self._callbacks):
+            callback(value)
+
+
+class _FakeWorker:
+    def __init__(self) -> None:
+        self.finished_ok = _FakeSignal()
+        self.finished_err = _FakeSignal()
+        self.started = False
+
+    def start(self) -> None:
+        self.started = True
+
+
 class MainWindowGuiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -64,7 +91,10 @@ class MainWindowGuiTests(unittest.TestCase):
     def _create_window(self) -> MainWindow:
         with (
             patch("dingmail.gui.main.detect_home_dir", return_value=self.home_dir),
-            patch("dingmail.gui.main.load_connection_profile", return_value=ConnectionProfile()),
+            patch(
+                "dingmail.gui.main.load_connection_profile_with_metadata",
+                return_value=ConnectionProfileLoadResult(profile=ConnectionProfile()),
+            ),
             patch.object(QtWidgets.QSystemTrayIcon, "isSystemTrayAvailable", return_value=False),
         ):
             window = MainWindow()
@@ -77,6 +107,23 @@ class MainWindowGuiTests(unittest.TestCase):
         (package_dir / "content").mkdir(parents=True)
         (package_dir / "content" / "body.md").write_text("# 标题\n\n正文", encoding="utf-8")
         return package_dir
+
+    def _create_run_paths(self, name: str = "20260605_120000_test") -> RunPaths:
+        run_dir = self.home_dir / "runs" / name
+        previews_dir = run_dir / "previews"
+        eml_dir = run_dir / "eml"
+        logs_dir = run_dir / "logs"
+        for path in [previews_dir, eml_dir, logs_dir]:
+            path.mkdir(parents=True, exist_ok=True)
+        manifest_csv = run_dir / "manifest.csv"
+        manifest_csv.write_text("idx,to_email,subject,status,message_id,error\n", encoding="utf-8")
+        return RunPaths(
+            run_dir=run_dir,
+            previews_dir=previews_dir,
+            eml_dir=eml_dir,
+            logs_dir=logs_dir,
+            manifest_csv=manifest_csv,
+        )
 
     def test_load_package_repairs_duplicate_ids_and_shows_warning(self) -> None:
         package_dir = self._create_package_dir("dup")
@@ -123,7 +170,7 @@ class MainWindowGuiTests(unittest.TestCase):
         window._reload_package()
 
         self.assertEqual({"task-1"}, window._runtime.queued_task_ids)
-        self.assertEqual("已加入定时队列", window._tasks[0].status)
+        self.assertEqual(TaskStatus.QUEUED, window._runtime.status_for(window._tasks[0]))
 
     def test_table_selection_and_smtp_state_refresh_buttons(self) -> None:
         package_dir = self._create_package_dir("basic")
@@ -157,6 +204,33 @@ class MainWindowGuiTests(unittest.TestCase):
         self._process_events()
         self.assertTrue(window._send_now_btn.isEnabled())
         self.assertTrue(window._save_drafts_btn.isEnabled())
+
+    def test_package_switch_actions_are_disabled_while_delivery_is_busy(self) -> None:
+        package_dir = self._create_package_dir("busy")
+        save_tasks_to_package(
+            package_dir,
+            [
+                MailTask(
+                    task_id="task-1",
+                    to_recipients=["a@example.com"],
+                    subject="主题",
+                    markdown_path="content/body.md",
+                )
+            ],
+        )
+
+        window = self._create_window()
+        window._load_package(package_dir)
+        window._send_worker = _FakeWorker()
+        window._refresh_ui_state()
+
+        self.assertFalse(window._download_package_btn.isEnabled())
+        self.assertFalse(window._import_package_btn.isEnabled())
+        self.assertFalse(window._reload_package_btn.isEnabled())
+
+        with patch.object(QtWidgets.QMessageBox, "information") as info_mock:
+            window._reload_package()
+        info_mock.assert_called_once()
 
     def test_workbench_layout_detail_panel_and_filters(self) -> None:
         package_dir = self._create_package_dir("workbench")
@@ -253,6 +327,104 @@ class MainWindowGuiTests(unittest.TestCase):
             window._exit_from_tray()
         self.assertTrue(window._quit_requested)
         self.assertTrue(quit_mock.called)
+
+    def test_delivery_worker_rejects_unexpected_result_type(self) -> None:
+        window = self._create_window()
+        worker = _FakeWorker()
+        marked_errors: list[str] = []
+
+        with patch.object(window, "_show_error_dialog") as error_mock:
+            window._start_delivery_worker(
+                spec=DeliveryWorkerSpec(
+                    worker=worker,
+                    worker_attr="_send_worker",
+                    apply_result=lambda _result: self.fail("unexpected result should not be applied"),
+                    mark_error=marked_errors.append,
+                    error_title="发送失败",
+                    error_prefix="发送任务失败",
+                )
+            )
+            worker.finished_ok.emit("bad-result")
+
+        self.assertTrue(worker.started)
+        self.assertIsNone(window._send_worker)
+        self.assertEqual(1, len(marked_errors))
+        self.assertIn("str", marked_errors[0])
+        error_mock.assert_called_once()
+
+    def test_delivery_result_does_not_mutate_current_tasks_after_package_switch(self) -> None:
+        old_package = self._create_package_dir("old")
+        new_package = self._create_package_dir("new")
+        save_tasks_to_package(
+            old_package,
+            [
+                MailTask(
+                    task_id="same-id",
+                    to_recipients=["old@example.com"],
+                    subject="旧任务",
+                    markdown_path="content/body.md",
+                )
+            ],
+        )
+        save_tasks_to_package(
+            new_package,
+            [
+                MailTask(
+                    task_id="same-id",
+                    to_recipients=["new@example.com"],
+                    subject="新任务",
+                    markdown_path="content/body.md",
+                )
+            ],
+        )
+
+        window = self._create_window()
+        window._load_package(old_package)
+        submitted_tasks = list(window._tasks)
+        window._runtime.mark_sending(submitted_tasks)
+        window._load_package(new_package)
+        result = SendTasksResult(
+            run_paths=self._create_run_paths(),
+            outcomes=[
+                TaskDeliveryOutcome(
+                    task_id="same-id",
+                    to_email="old@example.com",
+                    cc_email="",
+                    subject="旧任务",
+                    status="sent",
+                    message_id="<m1>",
+                    error=None,
+                )
+            ],
+        )
+
+        with patch.object(QtWidgets.QMessageBox, "information"):
+            window._apply_send_result(submitted_tasks, old_package, result)
+
+        current_task = window._tasks[0]
+        self.assertEqual("新任务", current_task.subject)
+        self.assertEqual(TaskStatus.READY, window._runtime.status_for(current_task))
+        self.assertEqual("", window._runtime.last_result_for(current_task))
+        self.assertEqual(result.run_paths.run_dir, window._last_run_dir)
+
+    def test_connection_profile_source_refreshes_after_successful_save(self) -> None:
+        window = self._create_window()
+        saved_path = self.home_dir / "conn_profile.json"
+        window._connection_profile_source_text = "配置：旧配置（待迁移） · 明文授权码"
+        window._connection_profile_source_detail = "来源：legacy"
+        window._connection_profile_warning = "需要迁移"
+        window._refresh_smtp_summary_labels()
+
+        with (
+            patch.object(window, "_save_connection_profile", return_value=saved_path),
+            patch.object(QtWidgets.QMessageBox, "information"),
+        ):
+            window._handle_smtp_connected("new@example.com", "secret", "ok")
+
+        self.assertEqual("", window._connection_profile_warning)
+        self.assertEqual("配置：用户配置", window._connection_profile_source_text)
+        self.assertEqual("配置：用户配置", window._profile_source_label.text())
+        self.assertIn(str(saved_path), window._profile_source_label.toolTip())
 
 
 if __name__ == "__main__":

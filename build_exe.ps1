@@ -34,7 +34,12 @@ if (-not (Test-Path $venvDir)) {
 
 $py = Join-Path $venvDir "Scripts\\python.exe"
 & $py -m pip install -U pip
-& $py -m pip install -r (Join-Path $root "requirements.txt")
+$constraints = Join-Path $root "constraints.txt"
+if (Test-Path $constraints) {
+  & $py -m pip install -r (Join-Path $root "requirements.txt") -c $constraints
+} else {
+  & $py -m pip install -r (Join-Path $root "requirements.txt")
+}
 
 $distDir = Join-Path $root "release"
 $workDir = Join-Path $root "build\\pyinstaller"
@@ -54,4 +59,11 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host ("Build OK: " + (Join-Path $distDir "DingMailSender.exe"))
+$exePath = Join-Path $distDir "DingMailSender.exe"
+$hashPath = "$exePath.sha256"
+$hash = Get-FileHash -Algorithm SHA256 -LiteralPath $exePath
+("{0}  {1}" -f $hash.Hash.ToLowerInvariant(), (Split-Path -Leaf $exePath)) |
+  Set-Content -LiteralPath $hashPath -Encoding ascii
+
+Write-Host ("Build OK: " + $exePath)
+Write-Host ("SHA256: " + $hashPath)
