@@ -8,6 +8,7 @@ from ..connection_profile import (
     ConnectionProfileLoadError,
     ConnectionProfileLoadResult,
     load_connection_profile_with_metadata,
+    migrate_connection_profile_if_needed,
     save_connection_profile,
 )
 from ..model import SmtpConfig
@@ -79,14 +80,29 @@ class MainWindow(MainUiMixin, MainViewMixin, MainTaskMixin, MainDeliveryMixin, Q
             self._connection_profile_source_detail = f"连接成功后保存到：{self._conn_config_path}"
             return
 
-        if result.is_legacy_source:
+        migrated_path: Path | None = None
+        if result.is_legacy_source or result.uses_plaintext_secret:
+            try:
+                migrated_path = migrate_connection_profile_if_needed(result, self._conn_config_path)
+            except Exception as exc:
+                self._connection_profile_warning = (
+                    "检测到旧版连接配置或明文授权码。当前会继续读取以便你完成工作；"
+                    f"但自动迁移到用户配置目录失败：{exc}"
+                )
+
+        if migrated_path is not None:
+            self._connection_profile_source_text = "配置：用户配置（已自动迁移）"
+            self._connection_profile_source_detail = f"来源：{result.source_path}；已迁移到：{migrated_path}"
+            self._connection_profile_warning = ""
+        elif result.is_legacy_source:
             self._connection_profile_source_text = "配置：旧配置（待迁移）"
         else:
             self._connection_profile_source_text = "配置：用户配置"
-        if result.uses_plaintext_secret:
+        if result.uses_plaintext_secret and migrated_path is None:
             self._connection_profile_source_text += " · 明文授权码"
-        self._connection_profile_source_detail = f"来源：{result.source_path}"
-        if result.is_legacy_source or result.uses_plaintext_secret:
+        if migrated_path is None:
+            self._connection_profile_source_detail = f"来源：{result.source_path}"
+        if (result.is_legacy_source or result.uses_plaintext_secret) and migrated_path is None and not self._connection_profile_warning:
             self._connection_profile_warning = (
                 "检测到旧版连接配置或明文授权码。当前会继续读取以便你完成工作；"
                 "下次在“连接设置”里连接并测试成功后，会写入用户配置目录并使用 Windows DPAPI 保存授权码。"

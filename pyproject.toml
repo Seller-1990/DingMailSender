@@ -1,7 +1,7 @@
 [project]
 name = "ding-mail-sender"
 version = "0.1.0"
-description = "Local desktop tool for batch sending task-package emails."
+description = "Windows desktop tool for task-package based batch email sending with Markdown, attachments, IMAP drafts, tray scheduling, and DPAPI-protected SMTP credentials."
 requires-python = ">=3.12"
 dependencies = [
   "PySide6==6.10.1",

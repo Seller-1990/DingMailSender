@@ -14,6 +14,7 @@ from dingmail.connection_profile import (
     ConnectionProfileLoadError,
     load_connection_profile,
     load_connection_profile_with_metadata,
+    migrate_connection_profile_if_needed,
     save_connection_profile,
 )
 
@@ -121,6 +122,27 @@ class ConnectionProfileTests(unittest.TestCase):
 
             self.assertEqual(fallback.resolve(), fallback_path)
             self.assertTrue(fallback.exists())
+
+    def test_migrate_legacy_plaintext_profile_to_protected_target(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dingmail_profile_") as tmp:
+            root = Path(tmp)
+            legacy = root / "legacy" / "conn_profile.json"
+            target = root / "new" / "conn_profile.json"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text(
+                '{"from_email":"legacy@example.com","smtp_password":"legacy-token"}',
+                encoding="utf-8",
+            )
+
+            result = load_connection_profile_with_metadata(target, legacy)
+            migrated = migrate_connection_profile_if_needed(result, target)
+            reloaded = load_connection_profile_with_metadata(target, legacy)
+
+            self.assertEqual(target.resolve(), migrated)
+            self.assertTrue(target.exists())
+            self.assertEqual(ConnectionProfile("legacy@example.com", "legacy-token"), reloaded.profile)
+            self.assertFalse(reloaded.is_legacy_source)
+            self.assertFalse(reloaded.uses_plaintext_secret)
 
 
 if __name__ == "__main__":

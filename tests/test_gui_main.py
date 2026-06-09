@@ -426,6 +426,51 @@ class MainWindowGuiTests(unittest.TestCase):
         self.assertEqual("配置：用户配置", window._profile_source_label.text())
         self.assertIn(str(saved_path), window._profile_source_label.toolTip())
 
+    def test_legacy_plaintext_profile_is_migrated_when_gui_loads(self) -> None:
+        legacy_path = self.home_dir / "legacy" / "conn_profile.json"
+        load_result = ConnectionProfileLoadResult(
+            profile=ConnectionProfile(from_email="legacy@example.com", smtp_password="legacy-token"),
+            source_path=legacy_path,
+            is_legacy_source=True,
+            uses_plaintext_secret=True,
+        )
+
+        with (
+            patch("dingmail.gui.main.detect_home_dir", return_value=self.home_dir),
+            patch("dingmail.gui.main.load_connection_profile_with_metadata", return_value=load_result),
+            patch("dingmail.gui.main.migrate_connection_profile_if_needed") as migrate_mock,
+            patch.object(QtWidgets.QSystemTrayIcon, "isSystemTrayAvailable", return_value=False),
+        ):
+            migrate_mock.side_effect = lambda _result, target_path: target_path
+            window = MainWindow()
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(self._process_events)
+        migrated_path = window._conn_config_path
+
+        migrate_mock.assert_called_once_with(load_result, migrated_path)
+        self.assertEqual("配置：用户配置（已自动迁移）", window._connection_profile_source_text)
+        self.assertEqual("", window._connection_profile_warning)
+        self.assertIn(str(legacy_path), window._connection_profile_source_detail)
+        self.assertIn(str(migrated_path), window._profile_source_label.toolTip())
+
+    def test_main_window_state_proxy_keeps_legacy_attributes_working(self) -> None:
+        window = self._create_window()
+        self.assertIs(window._tasks, window._state.tasks)
+
+        window._package_dir = self.home_dir / "packages" / "proxy"
+        window._smtp_connected = True
+        window._connection_profile_source_text = "配置：代理测试"
+        window._connection_profile_warning = "警告"
+
+        self.assertEqual(window._package_dir, window._state.package_dir)
+        self.assertTrue(window._state.smtp_connected)
+        self.assertEqual("配置：代理测试", window._state.connection_profile_source_text)
+        self.assertEqual("警告", window._state.connection_profile_warning)
+
+        window._state.tasks.append(MailTask(task_id="state-task", to_recipients=["a@example.com"], subject="状态拆分"))
+        self.assertEqual("state-task", window._tasks[0].task_id)
+
+
 
 if __name__ == "__main__":
     unittest.main()

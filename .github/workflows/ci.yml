@@ -46,6 +46,10 @@ jobs:
           if (-not (Test-Path .\release\DingMailSender.exe)) { throw "Missing release\DingMailSender.exe" }
           if (-not (Test-Path .\release\DingMailSender.exe.sha256)) { throw "Missing SHA256 checksum" }
 
+      - name: Audit release outputs
+        shell: pwsh
+        run: .\scripts\audit_release.ps1
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

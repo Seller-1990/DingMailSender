@@ -1,6 +1,8 @@
 # DingMailSender
 
-本地企业邮箱批量发送桌面工具，面向“按任务包批量发信”的日常场景。
+DingMailSender 是一款面向 Windows 桌面的本地企业邮箱批量发送工具，适合行政通知、周报汇报、活动邀约、客户跟进等“按任务包批量发信”场景。它以 `tasks.xlsx` 管理收件人与发送状态，以 Markdown 维护邮件正文，支持附件、正文图片 CID 转换、IMAP 草稿箱留存、托盘定时发送，并在 Windows 下使用 DPAPI 加密保存 SMTP 授权码。
+
+项目定位：**本地运行、任务包驱动、可预览可追溯、适合企业邮箱批量草稿/发送流程的轻量桌面工具**。
 
 当前版本提供：
 
@@ -153,3 +155,21 @@ release\DingMailSender.exe
 - `build_exe.ps1`：PyInstaller 打包脚本
 - `run_gui.ps1`：本地 GUI 启动脚本
 
+
+
+## 安全与授权码存储
+
+- Windows 下保存连接配置时，授权码优先使用 DPAPI 绑定当前 Windows 用户加密；配置文件迁移后不再保存明文授权码。
+- GUI 启动加载旧版明文配置时会尝试自动迁移为当前用户 DPAPI 加密格式；若迁移失败，可在“连接设置”中测试成功后重新保存，并在界面查看配置来源与迁移提示。
+- 非 Windows 或 DPAPI 不可用环境不会静默降级为明文保存；如需迁移，请在目标 Windows 用户下重新保存连接配置。
+- 请勿将个人配置目录、运行日志、`runs/`、`release/` 产物中的敏感样例提交到仓库。
+
+## 发布链路审计
+
+CI 在 Windows 上执行单元测试、PyInstaller 打包、生成 SHA256，并通过 `scripts/audit_release.ps1` 校验发布产物存在、非空、校验和格式与实际哈希一致。
+本地发布前可执行：
+
+```powershell
+.\build_exe.ps1
+.\scripts\audit_release.ps1
+```

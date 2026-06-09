@@ -138,6 +138,21 @@ def load_connection_profile(*paths: Path) -> ConnectionProfile:
     return load_connection_profile_with_metadata(*paths).profile
 
 
+def migrate_connection_profile_if_needed(result: ConnectionProfileLoadResult, target_path: Path) -> Path | None:
+    """Rewrite legacy/plaintext connection profile to the canonical protected location.
+
+    Returns the saved target path when migration is performed; otherwise ``None``.
+    """
+    if result.source_path is None:
+        return None
+    if not result.is_legacy_source and not result.uses_plaintext_secret:
+        return None
+    profile = result.profile
+    if not profile.from_email and not profile.smtp_password:
+        return None
+    return save_connection_profile(target_path, from_email=profile.from_email, smtp_password=profile.smtp_password)
+
+
 def save_connection_profile(*paths: Path, from_email: str, smtp_password: str) -> Path:
     password_mode, password_payload = _protect_secret(smtp_password)
     payload = {
