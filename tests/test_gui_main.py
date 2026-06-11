@@ -328,6 +328,61 @@ class MainWindowGuiTests(unittest.TestCase):
         self.assertTrue(window._quit_requested)
         self.assertTrue(quit_mock.called)
 
+    def test_exit_from_tray_blocked_while_delivery_worker_running(self) -> None:
+        window = self._create_window()
+        window._tray = _FakeTray()
+        window._draft_worker = _FakeWorker()
+
+        with (
+            patch.object(QtWidgets.QMessageBox, "information") as info_mock,
+            patch.object(QtWidgets.QApplication, "quit") as quit_mock,
+        ):
+            window._exit_from_tray()
+
+        info_mock.assert_called_once()
+        quit_mock.assert_not_called()
+        self.assertFalse(window._quit_requested)
+
+    def test_close_event_blocked_without_tray_while_delivery_worker_running(self) -> None:
+        window = self._create_window()
+        window._tray = None
+        window._send_worker = _FakeWorker()
+
+        event = QtGui.QCloseEvent()
+        with patch.object(QtWidgets.QMessageBox, "information") as info_mock:
+            window.closeEvent(event)
+
+        info_mock.assert_called_once()
+        self.assertFalse(event.isAccepted())
+
+    def test_task_editing_is_blocked_while_delivery_busy(self) -> None:
+        package_dir = self._create_package_dir("busyedit")
+        save_tasks_to_package(
+            package_dir,
+            [
+                MailTask(
+                    task_id="task-1",
+                    to_recipients=["a@example.com"],
+                    subject="主题",
+                    markdown_path="content/body.md",
+                )
+            ],
+        )
+
+        window = self._create_window()
+        window._load_package(package_dir)
+        window._task_table.selectRow(0)
+        window._draft_worker = _FakeWorker()
+
+        with (
+            patch.object(QtWidgets.QMessageBox, "information") as info_mock,
+            patch("dingmail.gui.main_tasks.TaskEditorDialog") as dialog_mock,
+        ):
+            window._edit_selected_task()
+
+        info_mock.assert_called_once()
+        dialog_mock.assert_not_called()
+
     def test_delivery_worker_rejects_unexpected_result_type(self) -> None:
         window = self._create_window()
         worker = _FakeWorker()

@@ -180,6 +180,8 @@ class MainTaskMixin:
         return rows[0]
 
     def _add_task(self) -> None:
+        if self._delivery_is_busy(title="请稍候", message="当前正在发送或保存草稿，请完成后再编辑任务。"):
+            return
         if not self._require_package():
             return
         task = MailTask(task_id=uuid.uuid4().hex, enabled=True)
@@ -194,6 +196,10 @@ class MainTaskMixin:
             self._task_table.selectRow(len(updated) - 1)
 
     def _edit_selected_task(self) -> None:
+        # 表格双击也会进入这里，按钮禁用挡不住，必须显式拦截：
+        # 运行中改写 self._tasks 会让投递结果按对象身份匹配失败，状态永久卡在“发送中/草稿保存中”。
+        if self._delivery_is_busy(title="请稍候", message="当前正在发送或保存草稿，请完成后再编辑任务。"):
+            return
         if not self._require_package():
             return
         row = self._require_single_task()
@@ -210,6 +216,8 @@ class MainTaskMixin:
             self._task_table.selectRow(row)
 
     def _duplicate_selected_tasks(self) -> None:
+        if self._delivery_is_busy(title="请稍候", message="当前正在发送或保存草稿，请完成后再编辑任务。"):
+            return
         if not self._require_package():
             return
         rows = self._selected_rows()
@@ -228,6 +236,8 @@ class MainTaskMixin:
         self._persist_tasks(updated_tasks=updated)
 
     def _delete_selected_tasks(self) -> None:
+        if self._delivery_is_busy(title="请稍候", message="当前正在发送或保存草稿，请完成后再编辑任务。"):
+            return
         if not self._require_package():
             return
         rows = self._selected_rows()

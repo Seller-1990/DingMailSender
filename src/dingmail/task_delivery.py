@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import imaplib
 import logging
+import smtplib
+import ssl
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -38,6 +41,24 @@ class TaskDeliveryOutcome:
     status: str
     message_id: str | None
     error: str | None
+
+
+# 会话级异常：连接已不可用，继续循环只会让剩余任务逐条失败并逐条 sleep。
+# 注意不要放宽到 OSError——渲染/附件的 FileNotFoundError 等文件错误必须保持任务级。
+SMTP_SESSION_ERRORS: tuple[type[Exception], ...] = (
+    smtplib.SMTPServerDisconnected,
+    smtplib.SMTPConnectError,
+    ConnectionError,
+    TimeoutError,
+    ssl.SSLError,
+)
+
+IMAP_SESSION_ERRORS: tuple[type[Exception], ...] = (
+    imaplib.IMAP4.abort,
+    ConnectionError,
+    TimeoutError,
+    ssl.SSLError,
+)
 
 
 @dataclass(frozen=True)
@@ -212,12 +233,37 @@ def _smtp_config_from_delivery(config: SendTasksConfig) -> SmtpConfig:
     )
 
 
+def _skip_remaining_tasks(
+    *,
+    tasks: list[MailTask],
+    start_idx: int,
+    status: str,
+    reason: str,
+    manifest_csv: Path,
+    logger: logging.Logger,
+) -> list[TaskDeliveryOutcome]:
+    skipped: list[TaskDeliveryOutcome] = []
+    for offset, task in enumerate(tasks, start=start_idx):
+        outcome = _build_outcome(
+            task=task,
+            status=status,
+            message_id=None,
+            error=f"连接中断，本任务未尝试：{reason}",
+        )
+        _append_outcome_manifest_row(manifest_csv, idx=offset, outcome=outcome)
+        skipped.append(outcome)
+    if skipped:
+        logger.error("session_error skipped=%d reason=%s", len(skipped), redact_text(reason))
+    return skipped
+
+
 def _send_single_task(
     *,
     smtp: SmtpSession,
     config: SendTasksConfig,
     context: DeliveryTaskContext,
-) -> TaskDeliveryOutcome:
+) -> tuple[TaskDeliveryOutcome, Exception | None]:
+    session_error: Exception | None = None
     try:
         rendered = render_task_email(context.task, config.package_dir)
         message = _build_message_from_rendered(context.task, config.smtp_username, rendered)
@@ -233,12 +279,16 @@ def _send_single_task(
         result = smtp.send(message)
         outcome = _build_outcome(task=context.task, status="sent", message_id=result.message_id, error=None)
         context.logger.info("sent task_id=%s to=%s", context.task.task_id, redact_email(outcome.to_email))
+    except SMTP_SESSION_ERRORS as exc:
+        session_error = exc
+        outcome = _build_outcome(task=context.task, status="send_error", message_id=None, error=str(exc))
+        context.logger.error("send_session_error task_id=%s: %s", context.task.task_id, redact_text(str(exc)))
     except Exception as exc:
         outcome = _build_outcome(task=context.task, status="send_error", message_id=None, error=str(exc))
         context.logger.error("send_error task_id=%s: %s", context.task.task_id, redact_text(str(exc)))
 
     _append_outcome_manifest_row(context.run_paths.manifest_csv, idx=context.index, outcome=outcome)
-    return outcome
+    return outcome, session_error
 
 
 def send_tasks(config: SendTasksConfig) -> SendTasksResult:
@@ -251,13 +301,24 @@ def send_tasks(config: SendTasksConfig) -> SendTasksResult:
     try:
         with SmtpSession(_smtp_config_from_delivery(config), config.smtp_password) as smtp:
             for index, task in enumerate(config.tasks, start=1):
-                outcomes.append(
-                    _send_single_task(
-                        smtp=smtp,
-                        config=config,
-                        context=DeliveryTaskContext(run_paths=run_paths, logger=logger, index=index, task=task),
-                    )
+                outcome, session_error = _send_single_task(
+                    smtp=smtp,
+                    config=config,
+                    context=DeliveryTaskContext(run_paths=run_paths, logger=logger, index=index, task=task),
                 )
+                outcomes.append(outcome)
+                if session_error is not None:
+                    outcomes.extend(
+                        _skip_remaining_tasks(
+                            tasks=config.tasks[index:],
+                            start_idx=index + 1,
+                            status="send_skipped",
+                            reason=str(session_error),
+                            manifest_csv=run_paths.manifest_csv,
+                            logger=logger,
+                        )
+                    )
+                    break
                 _sleep_between_tasks(index, total, config.rate_limit_seconds)
         return SendTasksResult(run_paths=run_paths, outcomes=outcomes)
     finally:
@@ -269,7 +330,8 @@ def _save_single_draft(
     drafts: ImapDraftsSession,
     config: DraftsConfig,
     context: DeliveryTaskContext,
-) -> TaskDeliveryOutcome:
+) -> tuple[TaskDeliveryOutcome, Exception | None]:
+    session_error: Exception | None = None
     try:
         rendered = render_task_email(context.task, config.package_dir)
         message = _build_message_from_rendered(context.task, config.imap_username, rendered)
@@ -290,12 +352,16 @@ def _save_single_draft(
             error=None,
         )
         context.logger.info("draft_saved task_id=%s mailbox=%s", context.task.task_id, mailbox)
+    except IMAP_SESSION_ERRORS as exc:
+        session_error = exc
+        outcome = _build_outcome(task=context.task, status="draft_error", message_id=None, error=str(exc))
+        context.logger.error("draft_session_error task_id=%s: %s", context.task.task_id, redact_text(str(exc)))
     except Exception as exc:
         outcome = _build_outcome(task=context.task, status="draft_error", message_id=None, error=str(exc))
         context.logger.error("draft_error task_id=%s: %s", context.task.task_id, redact_text(str(exc)))
 
     _append_outcome_manifest_row(context.run_paths.manifest_csv, idx=context.index, outcome=outcome)
-    return outcome
+    return outcome, session_error
 
 
 def save_tasks_to_imap_drafts(config: DraftsConfig) -> SendTasksResult:
@@ -313,13 +379,24 @@ def save_tasks_to_imap_drafts(config: DraftsConfig) -> SendTasksResult:
             password=config.imap_password,
         ) as drafts:
             for index, task in enumerate(config.tasks, start=1):
-                outcomes.append(
-                    _save_single_draft(
-                        drafts=drafts,
-                        config=config,
-                        context=DeliveryTaskContext(run_paths=run_paths, logger=logger, index=index, task=task),
-                    )
+                outcome, session_error = _save_single_draft(
+                    drafts=drafts,
+                    config=config,
+                    context=DeliveryTaskContext(run_paths=run_paths, logger=logger, index=index, task=task),
                 )
+                outcomes.append(outcome)
+                if session_error is not None:
+                    outcomes.extend(
+                        _skip_remaining_tasks(
+                            tasks=config.tasks[index:],
+                            start_idx=index + 1,
+                            status="draft_skipped",
+                            reason=str(session_error),
+                            manifest_csv=run_paths.manifest_csv,
+                            logger=logger,
+                        )
+                    )
+                    break
                 _sleep_between_tasks(index, total, config.rate_limit_seconds)
         return SendTasksResult(run_paths=run_paths, outcomes=outcomes)
     finally:

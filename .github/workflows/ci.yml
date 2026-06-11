@@ -50,6 +50,10 @@ jobs:
         shell: pwsh
         run: .\scripts\audit_release.ps1
 
+      - name: Launch smoke (offscreen)
+        shell: pwsh
+        run: .\scripts\smoke_exe.ps1
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

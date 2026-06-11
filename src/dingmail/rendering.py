@@ -6,11 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from bs4 import BeautifulSoup
-from jinja2 import Environment, StrictUndefined
 from markdown_it import MarkdownIt
-
-from .model import CampaignConfig
-from .recipients_excel import Recipient
 
 
 @dataclass(frozen=True)
@@ -19,33 +15,6 @@ class InlineImage:
     mime_type: str
     filename: str
     data: bytes
-
-
-def _jinja_env() -> Environment:
-    return Environment(undefined=StrictUndefined, autoescape=False)
-
-
-def read_body_template(campaign_dir: Path, cfg: CampaignConfig) -> str:
-    path = (campaign_dir / cfg.body_template_file).resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"未找到 Markdown 模板文件：{path}")
-    return path.read_text(encoding="utf-8")
-
-
-def render_subject_and_markdown(
-    campaign_dir: Path, cfg: CampaignConfig, recipient: Recipient
-) -> tuple[str, str]:
-    env = _jinja_env()
-    variables = dict(recipient.variables)
-    variables["__row__"] = str(recipient.row_number)
-
-    subject = env.from_string(cfg.subject_template).render(**variables).strip()
-    body_md = env.from_string(read_body_template(campaign_dir, cfg)).render(**variables).strip()
-    if not subject:
-        raise ValueError(f"主题渲染结果为空（收件人：{recipient.email}）")
-    if not body_md:
-        raise ValueError(f"正文渲染结果为空（收件人：{recipient.email}）")
-    return subject, body_md
 
 
 def markdown_to_html(md_text: str) -> str:

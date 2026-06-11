@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from dingmail.email_builder import EmailMessageInput, build_email_message
-from dingmail.imap_drafts import _decode_imap_utf7, _encode_imap_utf7
+from dingmail.imap_drafts import _decode_imap_utf7, _encode_imap_utf7, _quote_mailbox
 from dingmail.task_models import MailTask
 from dingmail.task_service import render_task_preview_html, validate_task
 
@@ -111,6 +111,30 @@ class TaskServiceAndImapTests(unittest.TestCase):
 
         self.assertNotEqual(mailbox, encoded)
         self.assertEqual(mailbox, _decode_imap_utf7(encoded))
+
+    def test_quote_mailbox_quotes_names_with_spaces_and_specials(self) -> None:
+        self.assertEqual("Drafts", _quote_mailbox("Drafts"))
+        self.assertEqual('"Saved Drafts"', _quote_mailbox("Saved Drafts"))
+        self.assertEqual('"a\\"b"', _quote_mailbox('a"b'))
+        self.assertEqual('"INBOX Drafts"', _quote_mailbox('"INBOX Drafts"'))
+
+    def test_validate_task_flags_invalid_recipient_format(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dingmail_validate_") as tmp:
+            package_dir = Path(tmp)
+            (package_dir / "content").mkdir()
+            (package_dir / "content" / "body.md").write_text("正文", encoding="utf-8")
+
+            task = MailTask(
+                task_id="task-1",
+                to_recipients=["not-an-email"],
+                cc_recipients=["also bad"],
+                subject="主题",
+                markdown_path="content/body.md",
+            )
+
+            errors = validate_task(task, package_dir)
+            self.assertTrue(any("收件人邮箱格式不合法" in error for error in errors))
+            self.assertTrue(any("抄送邮箱格式不合法" in error for error in errors))
 
 
 if __name__ == "__main__":

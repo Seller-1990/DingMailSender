@@ -26,8 +26,11 @@ class DeliveryWorkerSpec:
 
 
 class MainDeliveryMixin:
+    def _delivery_worker_active(self) -> bool:
+        return self._send_worker is not None or self._draft_worker is not None
+
     def _delivery_is_busy(self, *, title: str, message: str) -> bool:
-        if self._send_worker is None and self._draft_worker is None:
+        if not self._delivery_worker_active():
             return False
         QtWidgets.QMessageBox.information(self, title, message)
         return True
@@ -173,6 +176,16 @@ class MainDeliveryMixin:
         ok_count = sum(1 for outcome in result.outcomes if outcome.status == "draft_saved")
         return ok_count, len(result.outcomes) - ok_count
 
+    @staticmethod
+    def _result_skipped_count(result: SendTasksResult) -> int:
+        return sum(1 for outcome in result.outcomes if outcome.status in ("send_skipped", "draft_skipped"))
+
+    @staticmethod
+    def _skipped_note(skipped_count: int) -> str:
+        if skipped_count <= 0:
+            return ""
+        return f"\n其中因连接中断未尝试：{skipped_count}（已计入失败，可重试）"
+
     def _mark_send_worker_error(self, tasks: list[MailTask], package_dir: Path, error_text: str) -> None:
         if self._delivery_result_matches_current_tasks(tasks, package_dir):
             self._runtime.mark_send_worker_error(tasks, error_text)
@@ -192,7 +205,8 @@ class MainDeliveryMixin:
         QtWidgets.QMessageBox.information(
             self,
             "发送完成",
-            f"本次输出目录：{result.run_paths.run_dir}\n发送成功：{sent_count}\n发送失败：{failed_count}",
+            f"本次输出目录：{result.run_paths.run_dir}\n发送成功：{sent_count}\n发送失败：{failed_count}"
+            f"{self._skipped_note(self._result_skipped_count(result))}",
         )
 
     def _apply_draft_result(self, tasks: list[MailTask], package_dir: Path, result: SendTasksResult) -> None:
@@ -206,7 +220,8 @@ class MainDeliveryMixin:
         QtWidgets.QMessageBox.information(
             self,
             "保存草稿完成",
-            f"本次输出目录：{result.run_paths.run_dir}\n草稿保存成功：{ok_count}\n草稿保存失败：{fail_count}",
+            f"本次输出目录：{result.run_paths.run_dir}\n草稿保存成功：{ok_count}\n草稿保存失败：{fail_count}"
+            f"{self._skipped_note(self._result_skipped_count(result))}",
         )
 
     def _save_selected_to_drafts(self) -> None:

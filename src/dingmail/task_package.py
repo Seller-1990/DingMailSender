@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -174,19 +175,23 @@ def _task_row_values(task: MailTask) -> list[object]:
     ]
 
 
-def _snapshot_extra_task_columns(worksheet) -> tuple[range, dict[int, object], dict[str, dict[int, object]]]:
+def _snapshot_extra_task_columns(
+    worksheet,
+) -> tuple[range, dict[int, object], dict[str, dict[int, object]], dict[int, dict[int, object]]]:
     extra_start = len(TASK_COLUMNS) + 1
     extra_columns = range(extra_start, worksheet.max_column + 1)
     extra_headers = {col: worksheet.cell(row=1, column=col).value for col in extra_columns}
     extra_values_by_task_id: dict[str, dict[int, object]] = {}
+    extra_values_by_row: dict[int, dict[int, object]] = {}
     for row_index in range(2, worksheet.max_row + 1):
+        values = {col: worksheet.cell(row=row_index, column=col).value for col in extra_columns}
         task_id = str(worksheet.cell(row=row_index, column=1).value or "").strip()
-        if not task_id:
-            continue
-        extra_values_by_task_id[task_id] = {
-            col: worksheet.cell(row=row_index, column=col).value for col in extra_columns
-        }
-    return extra_columns, extra_headers, extra_values_by_task_id
+        if task_id and task_id not in extra_values_by_task_id:
+            extra_values_by_task_id[task_id] = values
+        else:
+            # 任务ID 缺失或与前行重复时无法按 ID 关联，按行位置兜底，避免用户自加列被清空。
+            extra_values_by_row[row_index] = values
+    return extra_columns, extra_headers, extra_values_by_task_id, extra_values_by_row
 
 
 def _resize_task_sheet_rows(worksheet, target_row_count: int) -> None:
@@ -218,15 +223,21 @@ def _write_task_row(
 
 
 def _write_tasks_sheet(worksheet, tasks: list[MailTask]) -> None:
-    extra_columns, extra_headers, extra_values_by_task_id = _snapshot_extra_task_columns(worksheet)
+    extra_columns, extra_headers, extra_values_by_task_id, extra_values_by_row = _snapshot_extra_task_columns(
+        worksheet
+    )
     _resize_task_sheet_rows(worksheet, len(tasks) + 1)
     _write_task_header(worksheet, extra_headers)
     for row_index, task in enumerate(tasks, start=2):
+        extra_values = extra_values_by_task_id.get(task.task_id)
+        if extra_values is None:
+            # 刚被修复过 ID 的行在旧文件里没有可用键；导入修复随即写回时行序未变，按位置取回。
+            extra_values = extra_values_by_row.get(row_index, {})
         _write_task_row(
             worksheet,
             row_index=row_index,
             task=task,
-            extra_state=(extra_columns, extra_values_by_task_id.get(task.task_id, {})),
+            extra_state=(extra_columns, extra_values),
         )
 
 
@@ -261,8 +272,10 @@ def _is_blank_task_row(row: tuple[object, ...]) -> bool:
 
 def _mail_task_from_row(row: tuple[object, ...], header_map: dict[str, int]) -> MailTask:
     value = lambda column: _row_value(row, header_map, column)
+    # 任务ID 缺失时保留空串，由 ensure_unique_task_ids 统一修复并向调用方报告，
+    # 避免每次加载生成不同 ID 且不写回（曾导致额外列按 ID 关联失败被清空）。
     return MailTask(
-        task_id=str(value("任务ID") or uuid.uuid4().hex),
+        task_id=str(value("任务ID") or "").strip(),
         enabled=parse_bool(value("是否启用")) if value("是否启用") is not None else True,
         to_recipients=split_emails(str(value("收件人") or "")),
         cc_recipients=split_emails(str(value("抄送人") or "")),
@@ -297,33 +310,16 @@ def save_tasks_to_package(package_dir: Path, tasks: list[MailTask]) -> Path:
     ensure_unique_task_ids(tasks)
     tasks_path = package_dir / TASKS_FILENAME
     workbook = openpyxl.load_workbook(tasks_path) if tasks_path.exists() else openpyxl.Workbook()
-    worksheet = _ensure_tasks_sheet(workbook)
-    _write_tasks_sheet(worksheet, tasks)
-
-    workbook.save(tasks_path)
-    workbook.close()
+    try:
+        worksheet = _ensure_tasks_sheet(workbook)
+        _write_tasks_sheet(worksheet, tasks)
+        # 先写同目录临时文件再原子替换，保存中途失败（断电/被杀/磁盘满）不会截断 tasks.xlsx。
+        tmp_path = tasks_path.with_name(f"{TASKS_FILENAME}.tmp-{os.getpid()}")
+        try:
+            workbook.save(tmp_path)
+            os.replace(tmp_path, tasks_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    finally:
+        workbook.close()
     return tasks_path
-
-
-def build_template_tasks() -> list[MailTask]:
-    from .task_template import build_template_tasks as _build_template_tasks
-
-    return _build_template_tasks()
-
-
-def build_package_readme_text() -> str:
-    from .task_template import build_package_readme_text as _build_package_readme_text
-
-    return _build_package_readme_text()
-
-
-def create_template_package(package_dir: Path) -> Path:
-    from .task_template import create_template_package as _create_template_package
-
-    return _create_template_package(package_dir)
-
-
-def clone_task(task: MailTask) -> MailTask:
-    from .task_clone import clone_task as _clone_task
-
-    return _clone_task(task)

@@ -61,6 +61,21 @@ class PathsAndRunsTests(unittest.TestCase):
 
             self.assertEqual(root.resolve(), detected)
 
+    def test_detect_home_dir_fresh_frozen_install_uses_exe_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dingmail_home_") as tmp:
+            exe_dir = Path(tmp) / "Tools" / "DingMail"
+            exe_dir.mkdir(parents=True)
+
+            with mock.patch.object(sys, "executable", str(exe_dir / "DingMailSender.exe")), mock.patch.object(
+                sys,
+                "frozen",
+                True,
+                create=True,
+            ):
+                detected = detect_home_dir()
+
+            self.assertEqual(exe_dir.resolve(), detected)
+
     def test_connection_profile_path_points_to_user_config_directory(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dingmail_config_") as tmp:
             local_app_data = Path(tmp) / "LocalAppData"

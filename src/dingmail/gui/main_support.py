@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime
 
 from PySide6 import QtCore, QtWidgets
 
-EMAIL_RE = re.compile(r"^[^@\s;]+@[^@\s]+\.[^@\s]+$")
 SCHEDULE_CHECK_INTERVAL_MS = 15_000
 STATUS_ROW_COLORS = {
     "neutral": "#f3f6fa",

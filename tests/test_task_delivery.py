@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import imaplib
 import os
+import smtplib
 import sys
 import tempfile
 import unittest
@@ -46,6 +48,25 @@ class _FakeImapDraftsSession:
 
     def append_draft(self, message) -> str:
         return "Drafts"
+
+
+class _DisconnectingSmtpSession(_FakeSmtpSession):
+    """Succeeds once, then the connection drops."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__()
+        self._calls = 0
+
+    def send(self, message):
+        self._calls += 1
+        if self._calls >= 2:
+            raise smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+        return _FakeSmtpSendResult(message.get("Message-ID"))
+
+
+class _AbortingImapDraftsSession(_FakeImapDraftsSession):
+    def append_draft(self, message) -> str:
+        raise imaplib.IMAP4.abort("socket error: EOF")
 
 
 class TaskDeliveryTests(unittest.TestCase):
@@ -173,6 +194,58 @@ class TaskDeliveryTests(unittest.TestCase):
 
         self.assertEqual(2, len(result.outcomes))
         self.assertEqual([1.25], sleep_calls)
+
+    def test_send_tasks_aborts_remaining_tasks_after_session_error(self) -> None:
+        sleep_calls: list[float] = []
+
+        with (
+            patch("dingmail.task_delivery.SmtpSession", _DisconnectingSmtpSession),
+            patch("dingmail.task_delivery.render_task_email", return_value=self.rendered),
+            patch("dingmail.task_delivery.rate_limit_sleep", side_effect=lambda seconds: sleep_calls.append(seconds)),
+        ):
+            result = send_tasks(
+                SendTasksConfig(
+                    tasks=self._build_tasks(4),
+                    package_dir=self.package_dir,
+                    home_dir=self.home_dir,
+                    smtp_host="smtp.example.com",
+                    smtp_port=465,
+                    smtp_security="ssl",
+                    smtp_username="sender@example.com",
+                    smtp_password="secret",
+                    rate_limit_seconds=0.5,
+                )
+            )
+
+        statuses = [outcome.status for outcome in result.outcomes]
+        self.assertEqual(["sent", "send_error", "send_skipped", "send_skipped"], statuses)
+        # 断连后不再对已注定失败的剩余任务逐条 sleep。
+        self.assertEqual([0.5], sleep_calls)
+        for outcome in result.outcomes[2:]:
+            self.assertIn("连接中断", outcome.error or "")
+
+        manifest = result.run_paths.manifest_csv.read_text(encoding="utf-8")
+        self.assertEqual(5, len([line for line in manifest.splitlines() if line.strip()]))
+
+    def test_save_drafts_aborts_remaining_tasks_after_session_error(self) -> None:
+        with (
+            patch("dingmail.task_delivery.ImapDraftsSession", _AbortingImapDraftsSession),
+            patch("dingmail.task_delivery.render_task_email", return_value=self.rendered),
+            patch("dingmail.task_delivery.rate_limit_sleep"),
+        ):
+            result = save_tasks_to_imap_drafts(
+                DraftsConfig(
+                    tasks=self._build_tasks(3),
+                    package_dir=self.package_dir,
+                    home_dir=self.home_dir,
+                    imap_username="sender@example.com",
+                    imap_password="secret",
+                    rate_limit_seconds=0,
+                )
+            )
+
+        statuses = [outcome.status for outcome in result.outcomes]
+        self.assertEqual(["draft_error", "draft_skipped", "draft_skipped"], statuses)
 
 
 if __name__ == "__main__":

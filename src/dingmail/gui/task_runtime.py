@@ -3,15 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-import re
 
 from ..task_delivery import SendTasksResult
 from ..task_models import MailTask
 from ..task_package import resolve_user_path
 from ..task_service import validate_task
 from ..task_status import TaskStatus
-
-EMAIL_RE = re.compile(r"^[^@\s;]+@[^@\s]+\.[^@\s]+$")
 
 
 @dataclass
@@ -56,7 +53,9 @@ class TaskRuntimeController:
 
     def sync_task_ids(self, tasks: list[MailTask]) -> None:
         valid_ids = {task.task_id for task in tasks}
-        self.queued_task_ids.intersection_update(valid_ids)
+        # 编辑后取消定时的任务同步移出队列，避免调度器把它误判为失败。
+        schedulable_ids = {task.task_id for task in tasks if task.schedule_enabled}
+        self.queued_task_ids.intersection_update(schedulable_ids)
         self.sending_task_ids.intersection_update(valid_ids)
         self.drafting_task_ids.intersection_update(valid_ids)
         self._states = {task_id: state for task_id, state in self._states.items() if task_id in valid_ids}
@@ -98,12 +97,6 @@ class TaskRuntimeController:
                 return list(cached[1])
 
         errors = validate_task(task, self._package_dir, now=datetime.now() if check_schedule_time else None)
-        invalid_to = [email for email in task.to_recipients if not EMAIL_RE.match(email)]
-        invalid_cc = [email for email in task.cc_recipients if not EMAIL_RE.match(email)]
-        if invalid_to:
-            errors.append(f"收件人邮箱格式不合法：{'; '.join(invalid_to)}")
-        if invalid_cc:
-            errors.append(f"抄送邮箱格式不合法：{'; '.join(invalid_cc)}")
 
         if not check_schedule_time:
             self._validation_cache[task.task_id] = (self._task_validation_signature(task), list(errors))
@@ -263,12 +256,7 @@ class TaskRuntimeController:
             if task.task_id not in self.queued_task_ids:
                 continue
             if not task.schedule_enabled or task.scheduled_at is None:
-                self._set_state(
-                    task,
-                    status=TaskStatus.SEND_FAILED,
-                    error_message="任务已在定时队列中，但缺少合法发送时间",
-                    last_result=TaskStatus.SEND_FAILED.label,
-                )
+                # 任务入队后被编辑为非定时：静默出队即可，不应捏造一次从未发生的“发送失败”。
                 self.queued_task_ids.discard(task.task_id)
                 continue
             if task.scheduled_at > current_time:

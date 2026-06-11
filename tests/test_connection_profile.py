@@ -140,6 +140,7 @@ class ConnectionProfileTests(unittest.TestCase):
 
             self.assertEqual(target.resolve(), migrated)
             self.assertTrue(target.exists())
+            self.assertFalse(legacy.exists(), "迁移成功后旧明文配置文件应被删除")
             self.assertEqual(ConnectionProfile("legacy@example.com", "legacy-token"), reloaded.profile)
             self.assertFalse(reloaded.is_legacy_source)
             self.assertFalse(reloaded.uses_plaintext_secret)

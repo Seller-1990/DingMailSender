@@ -61,6 +61,22 @@ def _encode_imap_utf7(value: str) -> str:
     return "".join(parts)
 
 
+def _quote_mailbox(name: str) -> str:
+    """Quote a mailbox name for the IMAP wire protocol when required.
+
+    imaplib does not quote mailbox arguments itself; an unquoted name that
+    contains spaces breaks APPEND/SELECT at the protocol level.
+    """
+    if not name:
+        return name
+    if name.startswith('"') and name.endswith('"') and len(name) >= 2:
+        return name
+    if not any(char in name for char in ' "\\'):
+        return name
+    escaped = name.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 class ImapDraftsSession:
     def __init__(self, host: str, port: int, username: str, password: str, timeout_seconds: int = 30) -> None:
         self._host = host
@@ -95,7 +111,7 @@ class ImapDraftsSession:
         mailbox = self._drafts_mailbox or self._create_or_pick_fallback_mailbox()
         payload = msg.as_bytes()
         internal_date = imaplib.Time2Internaldate(time.time())
-        status, data = self._imap.append(mailbox, "\\Draft", internal_date, payload)
+        status, data = self._imap.append(_quote_mailbox(mailbox), "\\Draft", internal_date, payload)
         if status != "OK":
             detail = data[0].decode("utf-8", errors="ignore") if data and isinstance(data[0], bytes) else str(data)
             raise RuntimeError(f"写入草稿箱失败: {detail}")
@@ -142,7 +158,7 @@ class ImapDraftsSession:
         candidates = ["Drafts", "草稿箱", "INBOX.Drafts", "INBOX/草稿箱", "INBOX/草稿"]
         for mailbox in candidates:
             encoded_mailbox = _encode_imap_utf7(mailbox)
-            status, _ = self._imap.select(encoded_mailbox, readonly=True)
+            status, _ = self._imap.select(_quote_mailbox(encoded_mailbox), readonly=True)
             if status == "OK":
                 return encoded_mailbox
 

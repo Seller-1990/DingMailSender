@@ -67,34 +67,6 @@ def _format_text_header(label: str, value: str) -> str:
     return text
 
 
-def _ensure_within(base_dir: Path, path: Path) -> None:
-    if base_dir not in path.parents and path != base_dir:
-        raise ValueError(f"路径不允许越界：{path}")
-
-
-def load_attachments(campaign_dir: Path, rel_paths: list[str]) -> list[Attachment]:
-    attachments: list[Attachment] = []
-    for rel in rel_paths:
-        rel = str(rel).strip()
-        if not rel:
-            continue
-        resolved = (campaign_dir / rel).resolve()
-        _ensure_within(campaign_dir, resolved)
-        if not resolved.is_file():
-            raise FileNotFoundError(f"未找到附件：{resolved}")
-
-        mime_type, _ = mimetypes.guess_type(resolved.name)
-        mime_type = mime_type or "application/octet-stream"
-        attachments.append(
-            Attachment(
-                filename=resolved.name,
-                mime_type=mime_type,
-                data=resolved.read_bytes(),
-            )
-        )
-    return attachments
-
-
 def attachment_from_path(path: Path) -> Attachment:
     mime_type, _ = mimetypes.guess_type(path.name)
     return Attachment(

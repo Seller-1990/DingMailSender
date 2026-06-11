@@ -142,6 +142,8 @@ def migrate_connection_profile_if_needed(result: ConnectionProfileLoadResult, ta
     """Rewrite legacy/plaintext connection profile to the canonical protected location.
 
     Returns the saved target path when migration is performed; otherwise ``None``.
+    On success, the legacy plaintext source file is removed (best effort) so the
+    authorization code does not linger on disk in plaintext.
     """
     if result.source_path is None:
         return None
@@ -150,7 +152,15 @@ def migrate_connection_profile_if_needed(result: ConnectionProfileLoadResult, ta
     profile = result.profile
     if not profile.from_email and not profile.smtp_password:
         return None
-    return save_connection_profile(target_path, from_email=profile.from_email, smtp_password=profile.smtp_password)
+    saved_path = save_connection_profile(target_path, from_email=profile.from_email, smtp_password=profile.smtp_password)
+    source_path = result.source_path.resolve()
+    if source_path != saved_path.resolve():
+        try:
+            source_path.unlink(missing_ok=True)
+        except OSError:
+            # 迁移本身已成功；删除旧文件失败不应阻断启动，残留风险由下次启动重试。
+            pass
+    return saved_path
 
 
 def save_connection_profile(*paths: Path, from_email: str, smtp_password: str) -> Path:

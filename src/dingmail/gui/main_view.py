@@ -4,9 +4,9 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..model import SmtpConfig
 from ..task_models import MailTask
-from ..task_service import render_task_preview_html
+from ..task_service import EMAIL_RE, render_task_preview_html
 from ..task_status import TaskStatus
-from .main_support import EMAIL_RE, TASK_FILTERS, error_summary
+from .main_support import TASK_FILTERS, error_summary
 from .theme import status_tone
 from .widgets import set_button_variant
 from .workers import TestSmtpWorker
@@ -175,6 +175,14 @@ class MainViewMixin:
         self.activateWindow()
 
     def _exit_from_tray(self) -> None:
+        if self._delivery_worker_active():
+            # QThread 运行中销毁会导致进程 abort，批次中断且重试会产生重复草稿。
+            QtWidgets.QMessageBox.information(
+                self,
+                "正在执行任务",
+                "当前正在发送或保存草稿，请等待本轮任务完成后再退出程序。",
+            )
+            return
         if self._runtime.queued_task_ids:
             reply = QtWidgets.QMessageBox.question(
                 self,
@@ -187,6 +195,15 @@ class MainViewMixin:
         QtWidgets.QApplication.quit()
 
     def _handle_close_event(self, event: QtGui.QCloseEvent) -> None:
+        if self._delivery_worker_active() and (self._quit_requested or self._tray is None):
+            QtWidgets.QMessageBox.information(
+                self,
+                "正在执行任务",
+                "当前正在发送或保存草稿，请等待本轮任务完成后再退出。",
+            )
+            event.ignore()
+            return
+
         if self._quit_requested or self._tray is None:
             event.accept()
             return

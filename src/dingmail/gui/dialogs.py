@@ -446,7 +446,9 @@ class RunHistoryDialog(QtWidgets.QDialog):
 
         statuses = [str(row.get("status") or "").strip() for row in rows]
         success = sum(1 for status in statuses if status in {"sent", "draft_saved"})
-        failed = sum(1 for status in statuses if status in {"send_error", "draft_error"})
+        failed = sum(
+            1 for status in statuses if status in {"send_error", "draft_error", "send_skipped", "draft_skipped"}
+        )
         latest_error = next((str(row.get("error") or "").strip() for row in rows if row.get("error")), "")
         summary = f"{cls._action_label(statuses)} · 共 {len(rows)} · 成功 {success} · 失败 {failed}"
         if latest_error:

@@ -158,7 +158,17 @@ class MainWindow(MainUiMixin, MainViewMixin, MainTaskMixin, MainDeliveryMixin, Q
 
 def run() -> int:
     app = QtWidgets.QApplication([])
-    window = MainWindow()
+    try:
+        window = MainWindow()
+    except Exception as exc:
+        QtWidgets.QMessageBox.critical(
+            None,
+            "启动失败",
+            "程序初始化失败，可能是无法创建或访问工作目录。\n"
+            f"{exc}\n\n"
+            "请把程序放到可写目录后重试，或设置环境变量 DINGMAIL_HOME 指定工作目录。",
+        )
+        return 1
     window.show()
     return app.exec()
 

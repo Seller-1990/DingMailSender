@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import openpyxl
 
@@ -160,6 +161,92 @@ class TaskPackageTests(unittest.TestCase):
         self.assertEqual(3, len(loaded))
         self.assertEqual(3, len({task.task_id for task in loaded}))
         self.assertTrue(all(task.task_id for task in loaded))
+
+    def _write_sheet_with_extra_column(self, rows: list[list[object]]) -> None:
+        headers = [
+            "任务ID", "是否启用", "收件人", "抄送人", "主题", "开头/补充内容",
+            "Markdown路径", "是否有附件", "附件路径", "是否定时发送", "定时发送时间", "备注", "部门",
+        ]
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = TASKS_SHEET_NAME
+        sheet.append(headers)
+        for row in rows:
+            sheet.append(row)
+        workbook.save(self.package_dir / TASKS_FILENAME)
+        workbook.close()
+
+    def _read_extra_column(self) -> list[tuple[object, object]]:
+        workbook = openpyxl.load_workbook(self.package_dir / TASKS_FILENAME)
+        self.addCleanup(workbook.close)
+        sheet = workbook[TASKS_SHEET_NAME]
+        return [
+            (sheet.cell(row=row, column=1).value, sheet.cell(row=row, column=13).value)
+            for row in range(2, sheet.max_row + 1)
+        ]
+
+    def test_load_tasks_keeps_missing_task_ids_empty_for_repair_reporting(self) -> None:
+        self._write_sheet_with_extra_column(
+            [["", "是", "a@example.com", "", "主题1", "", "content/body.md", "否", "", "否", "", "", "市场部"]]
+        )
+
+        loaded = load_tasks_from_package(self.package_dir)
+        self.assertEqual("", loaded[0].task_id)
+
+        repairs = ensure_unique_task_ids(loaded)
+        self.assertEqual(1, len(repairs))
+
+    def test_save_preserves_extra_columns_when_task_ids_missing(self) -> None:
+        self._write_sheet_with_extra_column(
+            [
+                ["", "是", "a@example.com", "", "主题1", "", "content/body.md", "否", "", "否", "", "", "市场部"],
+                ["", "是", "b@example.com", "", "主题2", "", "content/body.md", "否", "", "否", "", "", "研发部"],
+            ]
+        )
+
+        tasks = load_tasks_from_package(self.package_dir)
+        ensure_unique_task_ids(tasks)
+        save_tasks_to_package(self.package_dir, tasks)
+
+        extra = self._read_extra_column()
+        self.assertEqual(["市场部", "研发部"], [value for _task_id, value in extra])
+        self.assertTrue(all(task_id for task_id, _value in extra))
+
+    def test_save_preserves_extra_columns_when_task_ids_duplicated(self) -> None:
+        self._write_sheet_with_extra_column(
+            [
+                ["t-1", "是", "a@example.com", "", "主题1", "", "content/body.md", "否", "", "否", "", "", "市场部"],
+                ["t-1", "是", "b@example.com", "", "主题2", "", "content/body.md", "否", "", "否", "", "", "研发部"],
+            ]
+        )
+
+        tasks = load_tasks_from_package(self.package_dir)
+        repairs = ensure_unique_task_ids(tasks)
+        self.assertEqual(1, len(repairs))
+        save_tasks_to_package(self.package_dir, tasks)
+
+        extra = self._read_extra_column()
+        self.assertEqual(("t-1", "市场部"), extra[0])
+        self.assertEqual("研发部", extra[1][1])
+        self.assertNotEqual("t-1", extra[1][0])
+
+    def test_failed_save_keeps_existing_tasks_file_intact(self) -> None:
+        save_tasks_to_package(
+            self.package_dir,
+            [MailTask(task_id="task-1", to_recipients=["a@example.com"], subject="主题", markdown_path="content/body.md")],
+        )
+        tasks_path = self.package_dir / TASKS_FILENAME
+        before = tasks_path.read_bytes()
+
+        with mock.patch.object(openpyxl.workbook.workbook.Workbook, "save", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                save_tasks_to_package(
+                    self.package_dir,
+                    [MailTask(task_id="task-2", to_recipients=["b@example.com"], subject="主题2", markdown_path="content/body.md")],
+                )
+
+        self.assertEqual(before, tasks_path.read_bytes())
+        self.assertEqual([], list(self.package_dir.glob("*.tmp-*")))
 
 
 if __name__ == "__main__":

@@ -48,14 +48,18 @@ def detect_home_dir() -> Path:
         if _looks_like_home_dir(candidate):
             return candidate
 
-    if getattr(sys, "frozen", False) and ((start_dir / "packages").is_dir() or (start_dir / "campaigns").is_dir()):
+    if getattr(sys, "frozen", False):
+        # 已有数据目录优先：兼容“EXE 在仓库 release\ 子目录”与“packages 与 EXE 同级”两种布局。
+        for candidate in (start_dir, start_dir.parent):
+            if (candidate / "packages").is_dir() or (candidate / "campaigns").is_dir():
+                return candidate
+        # 全新安装：工作目录就是 EXE 所在目录（与 README 承诺一致），
+        # 不再回退到父目录——那会把 packages/runs 散落到上级目录，
+        # 放在 Program Files 等只读位置时还会启动即崩。
         return start_dir
 
     # Fallback: when running from source, try to locate project root (.../src/dingmail/*).
-    if not getattr(sys, "frozen", False):
-        return start_dir.parents[1]
-
-    return start_dir.parent if start_dir.parent != start_dir else start_dir
+    return start_dir.parents[1]
 
 def packages_dir(home_dir: Path | None = None) -> Path:
     home = home_dir or detect_home_dir()

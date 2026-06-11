@@ -1,9 +1,7 @@
 altgraph==0.17.5
 beautifulsoup4==4.13.4
 et_xmlfile==2.0.0
-Jinja2==3.1.6
 markdown-it-py==4.0.0
-MarkupSafe==3.0.3
 mdurl==0.1.2
 openpyxl==3.1.5
 packaging==26.2
@@ -14,7 +12,6 @@ PySide6==6.10.1
 PySide6_Addons==6.10.1
 PySide6_Essentials==6.10.1
 pywin32-ctypes==0.2.3
-PyYAML==6.0.3
 setuptools==82.0.1
 shiboken6==6.10.1
 soupsieve==2.8.4

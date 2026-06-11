@@ -18,7 +18,7 @@
 - 端口：`465`
 - 安全方式：`SSL`
 - SMTP 授权码：阿里企业邮箱后台生成的客户端授权码
-- 登录信息文件：优先写入程序目录下的 `conn_profile.json`；目录不可写时会回退到工作目录
+- 登录信息文件：保存在用户配置目录 `%LOCALAPPDATA%\DingMailSender\conn_profile.json`；旧版程序目录/工作目录中的配置会自动迁移
 - Windows 下保存的 SMTP 授权码会通过 DPAPI 加密
 
 ## 3. 推荐操作流
@@ -154,10 +154,9 @@ V1 的定时发送规则如下：
 
 典型内容：
 
-- `previews\`：HTML 预览
-- `eml\`：邮件原文
-- `logs\send.log`：发送日志
-- `manifest.csv`：每封邮件的状态清单
+- `logs\send.log` 或 `logs\drafts.log`：运行日志
+- `manifest.csv`：每封邮件的状态清单（收件人与错误信息已脱敏）
+- `previews\`、`eml\`：默认为空；设置环境变量 `DINGMAIL_SAVE_DEBUG_ARTIFACTS=1` 后才会写入 HTML 预览与邮件原文
 
 ## 11. 常见问题
 

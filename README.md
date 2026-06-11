@@ -25,12 +25,12 @@ DingMailSender 是一款面向 Windows 桌面的本地企业邮箱批量发送�
 
 - SMTP 连接成功后，会自动保存发件邮箱与授权码信息
 - Windows 下 SMTP 授权码使用 DPAPI 加密保存
-- 登录信息优先写入程序目录的 `conn_profile.json`，不可写时回退到工作目录
+- 登录信息保存在用户配置目录 `%LOCALAPPDATA%\DingMailSender\conn_profile.json`；程序目录/工作目录中的旧版配置会在启动时自动迁移，迁移成功后旧明文文件会被删除
 - `Markdown路径`、`附件路径` 仅允许引用当前任务包目录内的文件，避免误取包外文件
 - `tasks.xlsx` 中缺失或重复的 `任务ID` 会在重新加载或保存时自动修复
-- 软件内编辑 `tasks.xlsx` 时，只更新 `Tasks` 工作表，保留其他工作表
+- 软件内编辑 `tasks.xlsx` 时，只更新 `Tasks` 工作表，保留其他工作表；写入采用“临时文件 + 原子替换”，保存中断不会损坏原文件
 - 每次发送 / 保存草稿都会生成唯一运行目录，避免同秒重复执行冲突
-- 发送和草稿流程会输出 `eml`、HTML 预览、日志、状态清单，方便追溯
+- 发送和草稿流程会输出运行日志与 `manifest.csv` 状态清单（收件人与错误信息已脱敏）；设置环境变量 `DINGMAIL_SAVE_DEBUG_ARTIFACTS=1` 时才会额外输出 `eml` 原文与 HTML 预览
 
 ## 快速开始
 
@@ -100,10 +100,9 @@ release\DingMailSender.exe
 
 每次发送或保存草稿后，会在 `runs/` 下生成一份输出：
 
-- `previews/`：HTML 预览
-- `eml/`：邮件原文
 - `logs/`：运行日志
-- `manifest.csv`：每封邮件的状态清单
+- `manifest.csv`：每封邮件的状态清单（收件人与错误信息已脱敏）
+- `previews/`、`eml/`：默认为空；设置 `DINGMAIL_SAVE_DEBUG_ARTIFACTS=1` 后才写入 HTML 预览与邮件原文（含完整收件人与正文，注意保管）
 
 ## 本地目录
 
@@ -111,9 +110,10 @@ release\DingMailSender.exe
 
 - `packages/`：任务包
 - `runs/`：运行输出
-- `conn_profile.json`：连接信息
 
-打包版默认以 EXE 所在目录作为工作目录；源码运行时默认以项目目录作为工作目录。也可以通过环境变量 `DINGMAIL_HOME` 指定。
+连接信息（发件邮箱与 DPAPI 加密的授权码）保存在用户配置目录 `%LOCALAPPDATA%\DingMailSender\conn_profile.json`，不随项目目录走。
+
+打包版默认以 EXE 所在目录作为工作目录；若 EXE 所在目录或其上一级已存在 `packages/`，则沿用该目录。源码运行时默认以项目目录作为工作目录。也可以通过环境变量 `DINGMAIL_HOME` 指定。
 
 ## 开发与测试
 

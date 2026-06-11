@@ -17,6 +17,8 @@ from .rendering import (
 from .task_models import MailTask
 from .task_package import resolve_user_path
 
+EMAIL_RE = re.compile(r"^[^@\s;]+@[^@\s]+\.[^@\s]+$")
+
 
 @dataclass(frozen=True)
 class RenderedTaskEmail:
@@ -165,13 +167,25 @@ def _validate_schedule(task: MailTask, now: datetime | None) -> list[str]:
     return []
 
 
+def _validate_recipients(task: MailTask) -> list[str]:
+    errors: list[str] = []
+    if not task.to_recipients:
+        errors.append("收件人为空")
+    invalid_to = [email for email in task.to_recipients if not EMAIL_RE.match(email)]
+    invalid_cc = [email for email in task.cc_recipients if not EMAIL_RE.match(email)]
+    if invalid_to:
+        errors.append(f"收件人邮箱格式不合法：{'; '.join(invalid_to)}")
+    if invalid_cc:
+        errors.append(f"抄送邮箱格式不合法：{'; '.join(invalid_cc)}")
+    return errors
+
+
 def validate_task(task: MailTask, package_dir: Path, now: datetime | None = None) -> list[str]:
     errors: list[str] = []
     if not task.enabled:
         return errors
 
-    if not task.to_recipients:
-        errors.append("收件人为空")
+    errors.extend(_validate_recipients(task))
     if not task.subject.strip():
         errors.append("主题为空")
     errors.extend(_validate_markdown_path(task, package_dir))
