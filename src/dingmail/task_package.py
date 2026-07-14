@@ -271,7 +271,9 @@ def _is_blank_task_row(row: tuple[object, ...]) -> bool:
 
 
 def _mail_task_from_row(row: tuple[object, ...], header_map: dict[str, int]) -> MailTask:
-    value = lambda column: _row_value(row, header_map, column)
+    def value(column: str) -> object:
+        return _row_value(row, header_map, column)
+
     # 任务ID 缺失时保留空串，由 ensure_unique_task_ids 统一修复并向调用方报告，
     # 避免每次加载生成不同 ID 且不写回（曾导致额外列按 ID 关联失败被清空）。
     return MailTask(

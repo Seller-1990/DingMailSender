@@ -5,11 +5,12 @@ from datetime import datetime
 from pathlib import Path
 import re
 
+from .constants import MAX_ATTACHMENT_BYTES, MAX_EMAIL_ASSET_BYTES, MAX_INLINE_IMAGE_BYTES, MEBIBYTE
 from .email_builder import Attachment, attachment_from_path
 from .rendering import (
     InlineImage,
-    collect_local_image_errors,
     embed_cid_images,
+    inspect_local_images,
     markdown_to_html,
     rewrite_local_images_for_preview,
     wrap_email_html,
@@ -89,13 +90,17 @@ def _resolve_attachments(task: MailTask, package_dir: Path) -> list[Attachment]:
 
 def _compose_markdown_parts(task: MailTask, package_dir: Path) -> tuple[str, Path]:
     markdown_body, markdown_parent = _read_markdown_file(task, package_dir)
+    return _compose_markdown_text(task, markdown_body), markdown_parent
+
+
+def _compose_markdown_text(task: MailTask, markdown_body: str) -> str:
     intro = _preserve_intro_line_breaks(task.intro_text)
     body = _strip_leading_markdown_title(markdown_body)
     if intro and body:
-        return f"{intro}\n\n{body}", markdown_parent
+        return f"{intro}\n\n{body}"
     if intro:
-        return intro, markdown_parent
-    return body, markdown_parent
+        return intro
+    return body
 
 
 def compose_task_markdown(task: MailTask, package_dir: Path) -> str:
@@ -117,6 +122,9 @@ def render_task_email(task: MailTask, package_dir: Path) -> RenderedTaskEmail:
         raise ValueError("邮件正文为空")
 
     html = wrap_email_html(markdown_to_html(composed_markdown))
+    asset_errors = _validate_task_assets(task, package_dir, html, markdown_parent)
+    if asset_errors:
+        raise ValueError("；".join(asset_errors))
     html_for_preview = rewrite_local_images_for_preview(html, markdown_parent)
     html_for_email, inline_images = embed_cid_images(html, markdown_parent)
     attachments = _resolve_attachments(task, package_dir)
@@ -130,21 +138,28 @@ def render_task_email(task: MailTask, package_dir: Path) -> RenderedTaskEmail:
     )
 
 
-def _validate_markdown_path(task: MailTask, package_dir: Path) -> list[str]:
-    if not task.markdown_path.strip():
-        return ["Markdown 路径为空"]
-    try:
-        markdown_file = resolve_user_path(package_dir, task.markdown_path)
-        if not markdown_file.is_file():
-            return [f"Markdown 文件不存在：{markdown_file}"]
-        markdown_text = markdown_file.read_text(encoding="utf-8")
-        return collect_local_image_errors(markdown_to_html(markdown_text), markdown_file.parent)
-    except Exception as exc:
-        return [str(exc)]
+def _size_mib(size: int) -> str:
+    return f"{size / MEBIBYTE:.1f} MiB"
 
 
-def _validate_attachments(task: MailTask, package_dir: Path) -> list[str]:
+def _validate_task_assets(
+    task: MailTask,
+    package_dir: Path,
+    html: str,
+    markdown_parent: Path,
+) -> list[str]:
     errors: list[str] = []
+    total_bytes = 0
+    image_paths, image_errors = inspect_local_images(html, markdown_parent)
+    errors.extend(image_errors)
+    for image in image_paths:
+        size = image.stat().st_size
+        total_bytes += size
+        if size > MAX_INLINE_IMAGE_BYTES:
+            errors.append(
+                f"内联图片过大：{image.name}（{_size_mib(size)}），上限 {_size_mib(MAX_INLINE_IMAGE_BYTES)}"
+            )
+
     for raw in task.attachment_paths:
         if not str(raw).strip():
             continue
@@ -152,9 +167,38 @@ def _validate_attachments(task: MailTask, package_dir: Path) -> list[str]:
             attachment = resolve_user_path(package_dir, raw)
             if not attachment.is_file():
                 errors.append(f"附件不存在：{attachment}")
+                continue
+            size = attachment.stat().st_size
+            total_bytes += size
+            if size > MAX_ATTACHMENT_BYTES:
+                errors.append(
+                    f"附件过大：{attachment.name}（{_size_mib(size)}），上限 {_size_mib(MAX_ATTACHMENT_BYTES)}"
+                )
         except Exception as exc:
             errors.append(str(exc))
+
+    if total_bytes > MAX_EMAIL_ASSET_BYTES:
+        errors.append(
+            f"邮件附件和内联图片总大小为 {_size_mib(total_bytes)}，上限 {_size_mib(MAX_EMAIL_ASSET_BYTES)}"
+        )
     return errors
+
+
+def _validate_content_and_assets(task: MailTask, package_dir: Path) -> list[str]:
+    if not task.markdown_path.strip():
+        return ["Markdown 路径为空"]
+    try:
+        markdown_file = resolve_user_path(package_dir, task.markdown_path)
+        if not markdown_file.is_file():
+            return [f"Markdown 文件不存在：{markdown_file}"]
+        markdown_text = markdown_file.read_text(encoding="utf-8")
+        composed_markdown = _compose_markdown_text(task, markdown_text)
+        if not composed_markdown:
+            return ["邮件正文为空"]
+        html = wrap_email_html(markdown_to_html(composed_markdown))
+        return _validate_task_assets(task, package_dir, html, markdown_file.parent)
+    except Exception as exc:
+        return [str(exc)]
 
 
 def _validate_schedule(task: MailTask, now: datetime | None) -> list[str]:
@@ -188,7 +232,6 @@ def validate_task(task: MailTask, package_dir: Path, now: datetime | None = None
     errors.extend(_validate_recipients(task))
     if not task.subject.strip():
         errors.append("主题为空")
-    errors.extend(_validate_markdown_path(task, package_dir))
-    errors.extend(_validate_attachments(task, package_dir))
+    errors.extend(_validate_content_and_assets(task, package_dir))
     errors.extend(_validate_schedule(task, now))
     return errors

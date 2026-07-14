@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
 
+from .. import __version__
 from ..connection_profile import (
     ConnectionProfileLoadError,
     ConnectionProfileLoadResult,
@@ -25,7 +26,7 @@ from .workers import SaveDraftsWorker, SendTasksWorker, TestSmtpWorker
 class MainWindow(MainUiMixin, MainViewMixin, MainTaskMixin, MainDeliveryMixin, QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("钉钉邮件发送")
+        self.setWindowTitle(f"钉钉邮件发送 v{__version__}")
         self.resize(1420, 880)
 
         home_dir = ensure_layout(detect_home_dir())

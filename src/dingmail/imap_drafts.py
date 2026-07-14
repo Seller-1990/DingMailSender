@@ -90,9 +90,21 @@ class ImapDraftsSession:
     def __enter__(self) -> "ImapDraftsSession":
         imaplib._MAXLINE = max(imaplib._MAXLINE, 1_000_000)  # type: ignore[attr-defined]
         session = imaplib.IMAP4_SSL(self._host, self._port, timeout=self._timeout_seconds)
-        session.login(self._username, self._password)
-        self._imap = session
-        self._drafts_mailbox = self._discover_drafts_mailbox()
+        try:
+            session.login(self._username, self._password)
+            self._imap = session
+            self._drafts_mailbox = self._discover_drafts_mailbox()
+        except BaseException:
+            self._imap = None
+            self._drafts_mailbox = None
+            try:
+                session.logout()
+            except Exception:
+                try:
+                    session.shutdown()
+                except Exception:
+                    pass
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[override]

@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, for example v0.2.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Resolve tag
+        id: release
+        shell: pwsh
+        run: |
+          $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') { throw "Invalid release tag: $tag" }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "artifact=DingMailSender-$tag-windows-x64" >> $env:GITHUB_OUTPUT
+
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install verification dependencies
+        run: |
+          python -m pip install -U pip
+          python -m pip install -r requirements.txt -c constraints.txt
+          python -m pip install ruff==0.12.5
+
+      - name: Verify tag and version
+        shell: pwsh
+        run: .\scripts\verify_release_version.ps1 -Tag "${{ steps.release.outputs.tag }}"
+
+      - name: Repository hygiene
+        shell: pwsh
+        run: .\scripts\check_repo_hygiene.ps1
+
+      - name: Static and unit checks
+        run: |
+          python -m ruff check .
+          python -m unittest discover -s tests
+          python -m compileall -q src dingmail_gui.py tests
+
+      - name: Build and audit release package
+        shell: pwsh
+        run: .\scripts\build_release.ps1 -Tag "${{ steps.release.outputs.tag }}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.release.outputs.artifact }}
+          path: |
+            release/${{ steps.release.outputs.artifact }}.exe
+            release/${{ steps.release.outputs.artifact }}.exe.sha256
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ steps.release.outputs.tag }}"
+          $artifact = "${{ steps.release.outputs.artifact }}"
+          gh release create $tag `
+            "release/$artifact.exe" `
+            "release/$artifact.exe.sha256" `
+            --verify-tag `
+            --title "DingMailSender $tag" `
+            --generate-notes

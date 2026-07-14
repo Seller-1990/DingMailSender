@@ -4,17 +4,137 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from dingmail.constants import (
+    MAX_ATTACHMENT_BYTES,
+    MAX_EMAIL_ASSET_BYTES,
+    MAX_INLINE_IMAGE_BYTES,
+)
 from dingmail.email_builder import EmailMessageInput, build_email_message
-from dingmail.imap_drafts import _decode_imap_utf7, _encode_imap_utf7, _quote_mailbox
+from dingmail.imap_drafts import ImapDraftsSession, _decode_imap_utf7, _encode_imap_utf7, _quote_mailbox
+from dingmail.model import SmtpConfig
+from dingmail.smtp_sender import SmtpSession
 from dingmail.task_models import MailTask
-from dingmail.task_service import render_task_preview_html, validate_task
+from dingmail.task_service import render_task_email, render_task_preview_html, validate_task
 
 
 class TaskServiceAndImapTests(unittest.TestCase):
+    def _write_task_files(self, package_dir: Path, markdown: str = "body") -> None:
+        (package_dir / "content").mkdir()
+        (package_dir / "content" / "body.md").write_text(markdown, encoding="utf-8")
+
+    def _valid_task(self, **overrides) -> MailTask:
+        values = {
+            "task_id": "task-1",
+            "to_recipients": ["a@example.com"],
+            "subject": "subject",
+            "markdown_path": "content/body.md",
+        }
+        values.update(overrides)
+        return MailTask(**values)
+
+    def test_validate_task_rejects_empty_composed_body(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dingmail_empty_body_") as tmp:
+            package_dir = Path(tmp)
+            self._write_task_files(package_dir, "# title\n\n")
+
+            errors = validate_task(self._valid_task(), package_dir)
+
+            self.assertTrue(errors)
+
+    def test_validate_task_accepts_intro_when_markdown_body_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dingmail_intro_body_") as tmp:
+            package_dir = Path(tmp)
+            self._write_task_files(package_dir, "# title\n\n")
+
+            errors = validate_task(self._valid_task(intro_text="intro"), package_dir)
+
+            self.assertEqual([], errors)
+
+    def test_validate_task_rejects_oversized_attachment(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dingmail_large_attachment_") as tmp:
+            package_dir = Path(tmp)
+            self._write_task_files(package_dir)
+            attachment = package_dir / "large.bin"
+            with attachment.open("wb") as stream:
+                stream.truncate(MAX_ATTACHMENT_BYTES + 1)
+
+            errors = validate_task(
+                self._valid_task(attachment_paths=[attachment.name]),
+                package_dir,
+            )
+
+            self.assertTrue(any(attachment.name in error for error in errors))
+
+    def test_render_task_email_rejects_oversized_attachment_before_reading(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dingmail_render_large_attachment_") as tmp:
+            package_dir = Path(tmp)
+            self._write_task_files(package_dir)
+            attachment = package_dir / "large.bin"
+            with attachment.open("wb") as stream:
+                stream.truncate(MAX_ATTACHMENT_BYTES + 1)
+
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("must not read oversized file")) as read:
+                with self.assertRaises(ValueError):
+                    render_task_email(
+                        self._valid_task(attachment_paths=[attachment.name]),
+                        package_dir,
+                    )
+
+            read.assert_not_called()
+
+    def test_validate_task_rejects_oversized_inline_image(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dingmail_large_image_") as tmp:
+            package_dir = Path(tmp)
+            self._write_task_files(package_dir, "body\n\n![chart](chart.png)")
+            image = package_dir / "content" / "chart.png"
+            with image.open("wb") as stream:
+                stream.truncate(MAX_INLINE_IMAGE_BYTES + 1)
+
+            errors = validate_task(self._valid_task(), package_dir)
+
+            self.assertTrue(any(image.name in error for error in errors))
+
+    def test_validate_task_rejects_total_asset_size(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dingmail_total_assets_") as tmp:
+            package_dir = Path(tmp)
+            self._write_task_files(package_dir)
+            first = package_dir / "first.bin"
+            second = package_dir / "second.bin"
+            with first.open("wb") as stream:
+                stream.truncate(MAX_EMAIL_ASSET_BYTES // 2 + 1)
+            with second.open("wb") as stream:
+                stream.truncate(MAX_EMAIL_ASSET_BYTES // 2 + 1)
+
+            errors = validate_task(
+                self._valid_task(attachment_paths=[first.name, second.name]),
+                package_dir,
+            )
+
+            self.assertTrue(errors)
+
+    def test_smtp_enter_closes_connection_when_initialization_fails(self) -> None:
+        server = MagicMock()
+        server.ehlo.side_effect = RuntimeError("ehlo failed")
+        with patch("dingmail.smtp_sender.SMTP_SSL", return_value=server):
+            with self.assertRaisesRegex(RuntimeError, "ehlo failed"):
+                SmtpSession(SmtpConfig(), "password").__enter__()
+
+        server.close.assert_called_once_with()
+
+    def test_imap_enter_closes_connection_when_initialization_fails(self) -> None:
+        session = MagicMock()
+        session.login.side_effect = RuntimeError("login failed")
+        with patch("dingmail.imap_drafts.imaplib.IMAP4_SSL", return_value=session):
+            with self.assertRaisesRegex(RuntimeError, "login failed"):
+                ImapDraftsSession("host", 993, "user", "password").__enter__()
+
+        session.logout.assert_called_once_with()
+
     def test_render_task_preview_html_does_not_load_attachments(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dingmail_preview_") as tmp:
             package_dir = Path(tmp)

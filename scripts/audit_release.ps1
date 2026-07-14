@@ -1,9 +1,14 @@
+param(
+  [ValidatePattern('^[A-Za-z0-9._-]+$')]
+  [string]$ArtifactBaseName = "DingMailSender"
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
 
-$exePath = Join-Path $root "release\DingMailSender.exe"
+$exePath = Join-Path $root "release\$ArtifactBaseName.exe"
 $hashPath = "$exePath.sha256"
 
 if (-not (Test-Path -LiteralPath $exePath)) {
@@ -20,7 +25,7 @@ if ($checksumLine -notmatch '^[0-9a-fA-F]{64}\s+\S+$') {
 }
 $expected = ($checksumLine -split '\s+')[0].ToLowerInvariant()
 $fileName = ($checksumLine -split '\s+', 2)[1]
-if ($fileName -ne 'DingMailSender.exe') {
+if ($fileName -ne "$ArtifactBaseName.exe") {
   throw "Checksum filename mismatch: $fileName"
 }
 if ($actual -ne $expected) {

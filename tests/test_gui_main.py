@@ -291,6 +291,22 @@ class MainWindowGuiTests(unittest.TestCase):
         self.assertIn("成功 1", item_text)
         self.assertIn("失败 1", item_text)
 
+    def test_run_history_dialog_reports_unknown_delivery_status(self) -> None:
+        runs_root = self.home_dir / "runs"
+        run_dir = runs_root / "20260602_120001_demo"
+        run_dir.mkdir(parents=True)
+        (run_dir / "manifest.csv").write_text(
+            "idx,to_email,subject,status,message_id,error\n"
+            "1,us***@example.com,主题,send_cancelled,,\n",
+            encoding="utf-8",
+        )
+
+        dialog = RunHistoryDialog(runs_root=runs_root)
+        self.addCleanup(dialog.deleteLater)
+
+        item_text = dialog._list.item(0).text()
+        self.assertIn("未识别状态 1", item_text)
+
     def test_close_event_minimizes_to_tray_when_connected(self) -> None:
         window = self._create_window()
         fake_tray = _FakeTray()
@@ -376,12 +392,47 @@ class MainWindowGuiTests(unittest.TestCase):
 
         with (
             patch.object(QtWidgets.QMessageBox, "information") as info_mock,
-            patch("dingmail.gui.main_tasks.TaskEditorDialog") as dialog_mock,
+            patch("dingmail.gui.main_task_commands.TaskEditorDialog") as dialog_mock,
         ):
             window._edit_selected_task()
 
         info_mock.assert_called_once()
         dialog_mock.assert_not_called()
+
+    def test_persist_failure_preserves_existing_runtime_state(self) -> None:
+        package_dir = self._create_package_dir("persist_failure")
+        task = MailTask(
+            task_id="task-1",
+            to_recipients=["a@example.com"],
+            subject="old subject",
+            markdown_path="content/body.md",
+        )
+        updated_task = MailTask(
+            task_id="task-1",
+            to_recipients=["a@example.com"],
+            subject="new subject",
+            markdown_path="content/body.md",
+        )
+        window = self._create_window()
+        window._package_dir = package_dir
+        window._tasks = [task]
+        state = window._runtime.state_for(task)
+        state.status = TaskStatus.SENT
+        state.last_result = "sent before edit"
+
+        with (
+            patch("dingmail.gui.main_task_commands.save_tasks_to_package", side_effect=OSError("locked")),
+            patch.object(window, "_show_error_dialog"),
+        ):
+            saved = window._persist_tasks(
+                updated_tasks=[updated_task],
+                reset_runtime_task_ids=(updated_task.task_id,),
+            )
+
+        self.assertFalse(saved)
+        self.assertEqual("old subject", window._tasks[0].subject)
+        self.assertEqual(TaskStatus.SENT, window._runtime.status_for(task))
+        self.assertEqual("sent before edit", window._runtime.last_result_for(task))
 
     def test_delivery_worker_rejects_unexpected_result_type(self) -> None:
         window = self._create_window()

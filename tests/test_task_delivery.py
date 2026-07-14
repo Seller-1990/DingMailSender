@@ -12,7 +12,14 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from dingmail.task_delivery import DraftsConfig, SendTasksConfig, save_tasks_to_imap_drafts, send_tasks
+from dingmail.task_delivery import (
+    DeliveryStatus,
+    DraftsConfig,
+    SendTasksConfig,
+    TaskDeliveryOutcome,
+    save_tasks_to_imap_drafts,
+    send_tasks,
+)
 from dingmail.task_models import MailTask
 from dingmail.task_service import RenderedTaskEmail
 
@@ -122,6 +129,29 @@ class TaskDeliveryTests(unittest.TestCase):
         self.assertEqual(3, len(result.outcomes))
         self.assertEqual([0.5, 0.5], sleep_calls)
 
+    def test_delivery_outcome_normalizes_and_rejects_unknown_status(self) -> None:
+        outcome = TaskDeliveryOutcome(
+            task_id="task-1",
+            to_email="user@example.com",
+            cc_email="",
+            subject="主题",
+            status="sent",
+            message_id="<m1>",
+            error=None,
+        )
+
+        self.assertIs(DeliveryStatus.SENT, outcome.status)
+        with self.assertRaises(ValueError):
+            TaskDeliveryOutcome(
+                task_id="task-1",
+                to_email="user@example.com",
+                cc_email="",
+                subject="主题",
+                status="send_cancelled",
+                message_id=None,
+                error=None,
+            )
+
     def test_send_tasks_redacts_manifest_and_skips_debug_artifacts_by_default(self) -> None:
         with (
             patch.dict(os.environ, {"DINGMAIL_SAVE_DEBUG_ARTIFACTS": ""}),
@@ -218,7 +248,15 @@ class TaskDeliveryTests(unittest.TestCase):
             )
 
         statuses = [outcome.status for outcome in result.outcomes]
-        self.assertEqual(["sent", "send_error", "send_skipped", "send_skipped"], statuses)
+        self.assertEqual(
+            [
+                DeliveryStatus.SENT,
+                DeliveryStatus.SEND_ERROR,
+                DeliveryStatus.SEND_SKIPPED,
+                DeliveryStatus.SEND_SKIPPED,
+            ],
+            statuses,
+        )
         # 断连后不再对已注定失败的剩余任务逐条 sleep。
         self.assertEqual([0.5], sleep_calls)
         for outcome in result.outcomes[2:]:
@@ -245,7 +283,10 @@ class TaskDeliveryTests(unittest.TestCase):
             )
 
         statuses = [outcome.status for outcome in result.outcomes]
-        self.assertEqual(["draft_error", "draft_skipped", "draft_skipped"], statuses)
+        self.assertEqual(
+            [DeliveryStatus.DRAFT_ERROR, DeliveryStatus.DRAFT_SKIPPED, DeliveryStatus.DRAFT_SKIPPED],
+            statuses,
+        )
 
 
 if __name__ == "__main__":

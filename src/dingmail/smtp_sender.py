@@ -31,12 +31,19 @@ class SmtpSession:
             )
         else:
             server = SMTP(self._cfg.host, self._cfg.port, timeout=self._timeout)
-        server.ehlo()
-        if self._cfg.security == "starttls":
-            server.starttls(context=ssl.create_default_context())
+        try:
             server.ehlo()
-        if self._cfg.username and self._password:
-            server.login(self._cfg.username, self._password)
+            if self._cfg.security == "starttls":
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
+            if self._cfg.username and self._password:
+                server.login(self._cfg.username, self._password)
+        except BaseException:
+            try:
+                server.close()
+            except Exception:
+                pass
+            raise
         self._smtp = server
         return self
 

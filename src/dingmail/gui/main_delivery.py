@@ -7,7 +7,7 @@ from typing import Callable
 
 from PySide6 import QtCore, QtWidgets
 
-from ..task_delivery import SendTasksResult
+from ..task_delivery import DeliveryStatus, SendTasksResult
 from ..task_models import MailTask
 from ..task_status import TaskStatus
 from .main_support import error_summary
@@ -169,16 +169,16 @@ class MainDeliveryMixin:
         return all(id(task) in current_task_objects for task in tasks)
 
     def _send_result_counts(self, result: SendTasksResult) -> tuple[int, int]:
-        sent_count = sum(1 for outcome in result.outcomes if outcome.status == "sent")
+        sent_count = sum(1 for outcome in result.outcomes if outcome.status is DeliveryStatus.SENT)
         return sent_count, len(result.outcomes) - sent_count
 
     def _draft_result_counts(self, result: SendTasksResult) -> tuple[int, int]:
-        ok_count = sum(1 for outcome in result.outcomes if outcome.status == "draft_saved")
+        ok_count = sum(1 for outcome in result.outcomes if outcome.status is DeliveryStatus.DRAFT_SAVED)
         return ok_count, len(result.outcomes) - ok_count
 
     @staticmethod
     def _result_skipped_count(result: SendTasksResult) -> int:
-        return sum(1 for outcome in result.outcomes if outcome.status in ("send_skipped", "draft_skipped"))
+        return sum(1 for outcome in result.outcomes if outcome.status.is_skipped)
 
     @staticmethod
     def _skipped_note(skipped_count: int) -> str:

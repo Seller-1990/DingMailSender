@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools>=82.0.1"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "ding-mail-sender"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Windows desktop tool for task-package based batch email sending with Markdown, attachments, IMAP drafts, tray scheduling, and DPAPI-protected SMTP credentials."
 requires-python = ">=3.12"
 dependencies = [
@@ -17,3 +21,13 @@ build = [
 
 [tool.unittest]
 testpaths = ["tests"]
+
+[tool.setuptools.dynamic]
+version = {attr = "dingmail.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests add src/ to sys.path so unittest discovery also works without installing the package.
+"tests/*.py" = ["E402"]

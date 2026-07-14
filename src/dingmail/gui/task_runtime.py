@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from ..task_delivery import SendTasksResult
+from ..task_delivery import DeliveryStatus, SendTasksResult
 from ..task_models import MailTask
 from ..task_package import resolve_user_path
 from ..task_service import validate_task
@@ -190,7 +190,7 @@ class TaskRuntimeController:
                 continue
             self.sending_task_ids.discard(task.task_id)
             self.queued_task_ids.discard(task.task_id)
-            if outcome.status == "sent":
+            if outcome.status is DeliveryStatus.SENT:
                 self._set_state(
                     task,
                     status=TaskStatus.SENT,
@@ -205,7 +205,7 @@ class TaskRuntimeController:
                     last_result=TaskStatus.SEND_FAILED.label,
                 )
 
-        success_count = sum(1 for outcome in result.outcomes if outcome.status == "sent")
+        success_count = sum(1 for outcome in result.outcomes if outcome.status is DeliveryStatus.SENT)
         return success_count, len(result.outcomes) - success_count
 
     def apply_draft_result(self, tasks: list[MailTask], result: SendTasksResult) -> tuple[int, int]:
@@ -215,7 +215,7 @@ class TaskRuntimeController:
             if outcome is None:
                 continue
             self.drafting_task_ids.discard(task.task_id)
-            if outcome.status == "draft_saved":
+            if outcome.status is DeliveryStatus.DRAFT_SAVED:
                 self._set_state(
                     task,
                     status=TaskStatus.DRAFT_SAVED,
@@ -230,7 +230,7 @@ class TaskRuntimeController:
                     last_result=TaskStatus.DRAFT_FAILED.label,
                 )
 
-        success_count = sum(1 for outcome in result.outcomes if outcome.status == "draft_saved")
+        success_count = sum(1 for outcome in result.outcomes if outcome.status is DeliveryStatus.DRAFT_SAVED)
         return success_count, len(result.outcomes) - success_count
 
     def queue_scheduled_tasks(self, tasks: list[MailTask]) -> tuple[int, list[str]]:

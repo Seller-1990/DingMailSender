@@ -39,7 +39,8 @@ def _resolve_local_image(src: str, base_dir: Path) -> Path | None:
     return resolved
 
 
-def collect_local_image_errors(html: str, base_dir: Path) -> list[str]:
+def inspect_local_images(html: str, base_dir: Path) -> tuple[list[Path], list[str]]:
+    paths: list[Path] = []
     errors: list[str] = []
     soup = BeautifulSoup(html, "html.parser")
     for img in soup.find_all("img"):
@@ -57,7 +58,13 @@ def collect_local_image_errors(html: str, base_dir: Path) -> list[str]:
         mime_type, _ = mimetypes.guess_type(resolved.name)
         if not mime_type or not mime_type.startswith("image/"):
             errors.append(f"不支持的图片类型：{resolved.name}（{mime_type}）")
-    return errors
+            continue
+        paths.append(resolved)
+    return paths, errors
+
+
+def collect_local_image_errors(html: str, base_dir: Path) -> list[str]:
+    return inspect_local_images(html, base_dir)[1]
 
 
 def wrap_email_html(body_html: str) -> str:

@@ -27,6 +27,7 @@ DingMailSender 是一款面向 Windows 桌面的本地企业邮箱批量发送�
 - Windows 下 SMTP 授权码使用 DPAPI 加密保存
 - 登录信息保存在用户配置目录 `%LOCALAPPDATA%\DingMailSender\conn_profile.json`；程序目录/工作目录中的旧版配置会在启动时自动迁移，迁移成功后旧明文文件会被删除
 - `Markdown路径`、`附件路径` 仅允许引用当前任务包目录内的文件，避免误取包外文件
+- 发送前会校验邮件载荷：单个附件不超过 15 MiB、单张内联图片不超过 5 MiB、单封邮件文件总载荷不超过 18 MiB
 - `tasks.xlsx` 中缺失或重复的 `任务ID` 会在重新加载或保存时自动修复
 - 软件内编辑 `tasks.xlsx` 时，只更新 `Tasks` 工作表，保留其他工作表；写入采用“临时文件 + 原子替换”，保存中断不会损坏原文件
 - 每次发送 / 保存草稿都会生成唯一运行目录，避免同秒重复执行冲突
@@ -148,6 +149,14 @@ python -m compileall src dingmail_gui.py tests
 release\DingMailSender.exe
 ```
 
+正式候选包使用版本化文件名，并执行版本、哈希和启动检查：
+
+```powershell
+.\scripts\build_release.ps1 -Tag v0.2.0
+```
+
+完整版本规则、Tag 发布和回滚流程见 `docs/RELEASING.md`。
+
 ## 仓库说明
 
 - `src/`：源码
@@ -166,10 +175,12 @@ release\DingMailSender.exe
 
 ## 发布链路审计
 
-CI 在 Windows 上执行单元测试、PyInstaller 打包、生成 SHA256，并通过 `scripts/audit_release.ps1` 校验发布产物存在、非空、校验和格式与实际哈希一致。
+CI 在 Windows 上执行 Ruff、单元测试、编译检查、PyInstaller 打包、生成 SHA256，并通过 `scripts/audit_release.ps1` 校验发布产物存在、非空、校验和格式与实际哈希一致。
 本地发布前可执行：
 
 ```powershell
 .\build_exe.ps1
 .\scripts\audit_release.ps1
 ```
+
+推送与 `dingmail.__version__` 一致的 `v*.*.*` Tag 后，Release 工作流会重新完成上述检查，生成版本化 Windows 资产并创建 GitHub Release。已推送 Tag 不覆盖，问题版本通过递增补丁版本修复。
