@@ -74,6 +74,10 @@ class MainWindow(MainUiMixin, MainViewMixin, MainTaskMixin, MainDeliveryMixin, Q
                 username=from_email,
             )
         self._smtp_password = profile.smtp_password
+        if profile.imap_host:
+            self._imap_host = profile.imap_host
+        if profile.imap_port:
+            self._imap_port = profile.imap_port
 
     def _apply_connection_profile_metadata(self, result: ConnectionProfileLoadResult) -> None:
         if result.source_path is None:
@@ -191,6 +195,8 @@ for _attr_name, _state_name in {
     "_smtp_cfg": "smtp_cfg",
     "_smtp_password": "smtp_password",
     "_smtp_connected": "smtp_connected",
+    "_imap_host": "imap_host",
+    "_imap_port": "imap_port",
     "_package_dir": "package_dir",
     "_tasks": "tasks",
     "_runtime": "runtime",

@@ -86,8 +86,10 @@ class ImapDraftsSession:
         self._timeout_seconds = timeout_seconds
         self._imap: imaplib.IMAP4_SSL | None = None
         self._drafts_mailbox: str | None = None
+        self._original_maxline: int = imaplib._MAXLINE  # type: ignore[attr-defined]
 
     def __enter__(self) -> "ImapDraftsSession":
+        self._original_maxline = imaplib._MAXLINE  # type: ignore[attr-defined]
         imaplib._MAXLINE = max(imaplib._MAXLINE, 1_000_000)  # type: ignore[attr-defined]
         session = imaplib.IMAP4_SSL(self._host, self._port, timeout=self._timeout_seconds)
         try:
@@ -115,6 +117,7 @@ class ImapDraftsSession:
         except Exception:
             pass
         self._imap = None
+        imaplib._MAXLINE = self._original_maxline  # type: ignore[attr-defined]
 
     def append_draft(self, msg: EmailMessage) -> str:
         if self._imap is None:

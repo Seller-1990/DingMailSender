@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import ctypes
 import json
+import os
+import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +14,8 @@ from pathlib import Path
 class ConnectionProfile:
     from_email: str = ""
     smtp_password: str = ""
+    imap_host: str = ""
+    imap_port: int = 0
 
 
 @dataclass(frozen=True)
@@ -115,6 +119,8 @@ def _read_connection_profile(path: Path, *, is_legacy_source: bool) -> Connectio
         profile=ConnectionProfile(
             from_email=str(raw.get("from_email") or "").strip(),
             smtp_password=smtp_password,
+            imap_host=str(raw.get("imap_host") or "").strip(),
+            imap_port=int(raw.get("imap_port") or 0),
         ),
         source_path=path,
         is_legacy_source=is_legacy_source,
@@ -163,13 +169,17 @@ def migrate_connection_profile_if_needed(result: ConnectionProfileLoadResult, ta
     return saved_path
 
 
-def save_connection_profile(*paths: Path, from_email: str, smtp_password: str) -> Path:
+def save_connection_profile(*paths: Path, from_email: str, smtp_password: str, imap_host: str = "", imap_port: int = 0) -> Path:
     password_mode, password_payload = _protect_secret(smtp_password)
     payload = {
         "from_email": from_email.strip(),
         "smtp_password_mode": password_mode,
         "smtp_password_protected": password_payload,
     }
+    if imap_host:
+        payload["imap_host"] = imap_host.strip()
+    if imap_port:
+        payload["imap_port"] = imap_port
     last_error: Exception | None = None
     checked: set[Path] = set()
     for raw_path in paths:
@@ -180,6 +190,8 @@ def save_connection_profile(*paths: Path, from_email: str, smtp_password: str) -
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            if sys.platform == "win32":
+                os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
             return path
         except Exception as exc:
             last_error = exc

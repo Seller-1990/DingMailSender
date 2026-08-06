@@ -7,6 +7,7 @@ from typing import Callable
 
 from PySide6 import QtCore, QtWidgets
 
+from ..constants import DEFAULT_IMAP_HOST, DEFAULT_IMAP_PORT_SSL
 from ..task_delivery import DeliveryStatus, SendTasksResult
 from ..task_models import MailTask
 from ..task_status import TaskStatus
@@ -66,9 +67,24 @@ class MainDeliveryMixin:
             self._refresh_ui_state()
             self._show_error_dialog(spec.error_title, f"{spec.error_prefix}：{error_summary(tb)}", details=tb)
 
+        def _progress(current: int, total: int) -> None:
+            self._on_delivery_progress(current, total)
+
         spec.worker.finished_ok.connect(_ok)
         spec.worker.finished_err.connect(_err)
+        if hasattr(spec.worker, "progress"):
+            spec.worker.progress.connect(_progress)
         spec.worker.start()
+
+    def _on_delivery_progress(self, current: int, total: int) -> None:
+        if hasattr(self, "statusBar"):
+            self.statusBar().showMessage(f"正在处理 {current}/{total}...", 5000)
+
+    def _cancel_current_delivery(self) -> None:
+        if self._send_worker is not None and hasattr(self._send_worker, "request_cancel"):
+            self._send_worker.request_cancel()
+        if self._draft_worker is not None and hasattr(self._draft_worker, "request_cancel"):
+            self._draft_worker.request_cancel()
 
     def _start_send(self, tasks: list[MailTask], *, queue_mode: bool) -> None:
         if not self._package_dir:
@@ -142,6 +158,8 @@ class MainDeliveryMixin:
             home_dir=self._home_dir,
             imap_username=self._smtp_cfg.username.strip(),
             imap_password=self._smtp_password,
+            imap_host=self._imap_host,
+            imap_port=self._imap_port,
         ))
         self._start_delivery_worker(
             spec=DeliveryWorkerSpec(
@@ -202,11 +220,13 @@ class MainDeliveryMixin:
             sent_count, failed_count = self._send_result_counts(result)
         self._refresh_task_table()
         self._refresh_ui_state()
+        details = self._format_failure_details(result)
         QtWidgets.QMessageBox.information(
             self,
             "发送完成",
             f"本次输出目录：{result.run_paths.run_dir}\n发送成功：{sent_count}\n发送失败：{failed_count}"
-            f"{self._skipped_note(self._result_skipped_count(result))}",
+            f"{self._skipped_note(self._result_skipped_count(result))}"
+            f"{details}",
         )
 
     def _apply_draft_result(self, tasks: list[MailTask], package_dir: Path, result: SendTasksResult) -> None:
@@ -217,12 +237,30 @@ class MainDeliveryMixin:
             ok_count, fail_count = self._draft_result_counts(result)
         self._refresh_task_table()
         self._refresh_ui_state()
+        details = self._format_failure_details(result)
         QtWidgets.QMessageBox.information(
             self,
             "保存草稿完成",
             f"本次输出目录：{result.run_paths.run_dir}\n草稿保存成功：{ok_count}\n草稿保存失败：{fail_count}"
-            f"{self._skipped_note(self._result_skipped_count(result))}",
+            f"{self._skipped_note(self._result_skipped_count(result))}"
+            f"{details}",
         )
+
+    @staticmethod
+    def _format_failure_details(result: SendTasksResult) -> str:
+        failures = [
+            outcome for outcome in result.outcomes
+            if not outcome.status.is_success and not outcome.status.is_skipped
+        ]
+        if not failures:
+            return ""
+        lines = ["\n\n失败详情："]
+        for outcome in failures[:10]:
+            error_text = (outcome.error or "未知错误")[:80]
+            lines.append(f"  - {outcome.subject or outcome.task_id}：{error_text}")
+        if len(failures) > 10:
+            lines.append(f"  ...还有 {len(failures) - 10} 条")
+        return "\n".join(lines)
 
     def _save_selected_to_drafts(self) -> None:
         if not self._smtp_connected:

@@ -7,7 +7,7 @@ import ssl
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import cast
+from typing import Callable, cast
 
 from .constants import (
     DEFAULT_IMAP_HOST,
@@ -302,12 +302,21 @@ def _send_single_task(
             )
         )
         result = smtp.send(message)
-        outcome = _build_outcome(
-            task=context.task,
-            status=DeliveryStatus.SENT,
-            message_id=result.message_id,
-            error=None,
-        )
+        if result.has_partial_failure:
+            rejected = "; ".join(result.rejected_recipients.keys())
+            outcome = _build_outcome(
+                task=context.task,
+                status=DeliveryStatus.SENT,
+                message_id=result.message_id,
+                error=f"部分收件人被拒绝：{rejected}",
+            )
+        else:
+            outcome = _build_outcome(
+                task=context.task,
+                status=DeliveryStatus.SENT,
+                message_id=result.message_id,
+                error=None,
+            )
         context.logger.info("sent task_id=%s to=%s", context.task.task_id, redact_email(outcome.to_email))
     except SMTP_SESSION_ERRORS as exc:
         session_error = exc
@@ -331,7 +340,12 @@ def _send_single_task(
     return outcome, session_error
 
 
-def send_tasks(config: SendTasksConfig) -> SendTasksResult:
+def send_tasks(
+    config: SendTasksConfig,
+    *,
+    progress_callback: Callable[[int, int], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> SendTasksResult:
     run_paths = create_run_paths(home_dir=config.home_dir, campaign_dir=config.package_dir)
     logger = _build_logger(run_paths.logs_dir / "send.log", f"dingmail.send.{run_paths.run_dir.name}")
     _snapshot_package_files(config.package_dir, run_paths)
@@ -341,12 +355,26 @@ def send_tasks(config: SendTasksConfig) -> SendTasksResult:
     try:
         with SmtpSession(_smtp_config_from_delivery(config), config.smtp_password) as smtp:
             for index, task in enumerate(config.tasks, start=1):
+                if cancel_check and cancel_check():
+                    outcomes.extend(
+                        _skip_remaining_tasks(
+                            tasks=config.tasks[index - 1:],
+                            start_idx=index,
+                            status=DeliveryStatus.SEND_SKIPPED,
+                            reason="用户取消",
+                            manifest_csv=run_paths.manifest_csv,
+                            logger=logger,
+                        )
+                    )
+                    break
                 outcome, session_error = _send_single_task(
                     smtp=smtp,
                     config=config,
                     context=DeliveryTaskContext(run_paths=run_paths, logger=logger, index=index, task=task),
                 )
                 outcomes.append(outcome)
+                if progress_callback:
+                    progress_callback(index, total)
                 if session_error is not None:
                     outcomes.extend(
                         _skip_remaining_tasks(
@@ -414,7 +442,12 @@ def _save_single_draft(
     return outcome, session_error
 
 
-def save_tasks_to_imap_drafts(config: DraftsConfig) -> SendTasksResult:
+def save_tasks_to_imap_drafts(
+    config: DraftsConfig,
+    *,
+    progress_callback: Callable[[int, int], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> SendTasksResult:
     run_paths = create_run_paths(home_dir=config.home_dir, campaign_dir=config.package_dir)
     logger = _build_logger(run_paths.logs_dir / "drafts.log", f"dingmail.drafts.{run_paths.run_dir.name}")
     _snapshot_package_files(config.package_dir, run_paths)
@@ -429,12 +462,26 @@ def save_tasks_to_imap_drafts(config: DraftsConfig) -> SendTasksResult:
             password=config.imap_password,
         ) as drafts:
             for index, task in enumerate(config.tasks, start=1):
+                if cancel_check and cancel_check():
+                    outcomes.extend(
+                        _skip_remaining_tasks(
+                            tasks=config.tasks[index - 1:],
+                            start_idx=index,
+                            status=DeliveryStatus.DRAFT_SKIPPED,
+                            reason="用户取消",
+                            manifest_csv=run_paths.manifest_csv,
+                            logger=logger,
+                        )
+                    )
+                    break
                 outcome, session_error = _save_single_draft(
                     drafts=drafts,
                     config=config,
                     context=DeliveryTaskContext(run_paths=run_paths, logger=logger, index=index, task=task),
                 )
                 outcomes.append(outcome)
+                if progress_callback:
+                    progress_callback(index, total)
                 if session_error is not None:
                     outcomes.extend(
                         _skip_remaining_tasks(

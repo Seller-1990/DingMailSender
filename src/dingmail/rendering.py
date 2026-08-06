@@ -8,6 +8,8 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from markdown_it import MarkdownIt
 
+_MD_RENDERER = MarkdownIt("default", {"html": False})
+
 
 @dataclass(frozen=True)
 class InlineImage:
@@ -18,8 +20,7 @@ class InlineImage:
 
 
 def markdown_to_html(md_text: str) -> str:
-    md = MarkdownIt("default", {"html": False})
-    return md.render(md_text)
+    return _MD_RENDERER.render(md_text)
 
 
 def _is_external_image_source(src: str) -> bool:
@@ -85,6 +86,7 @@ def wrap_email_html(body_html: str) -> str:
 def embed_cid_images(html: str, base_dir: Path) -> tuple[str, list[InlineImage]]:
     soup = BeautifulSoup(html, "html.parser")
     images: list[InlineImage] = []
+    seen: dict[Path, str] = {}
 
     for img in soup.find_all("img"):
         src = (img.get("src") or "").strip()
@@ -98,7 +100,13 @@ def embed_cid_images(html: str, base_dir: Path) -> tuple[str, list[InlineImage]]
         if not mime_type or not mime_type.startswith("image/"):
             raise ValueError(f"不支持的图片类型：{resolved.name}（{mime_type}）")
 
+        existing_cid = seen.get(resolved)
+        if existing_cid is not None:
+            img["src"] = f"cid:{existing_cid}"
+            continue
+
         cid = f"{uuid.uuid4().hex}@dingmail"
+        seen[resolved] = cid
         img["src"] = f"cid:{cid}"
         images.append(
             InlineImage(

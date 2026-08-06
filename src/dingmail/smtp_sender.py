@@ -12,6 +12,11 @@ from .model import SmtpConfig
 @dataclass(frozen=True)
 class SmtpSendResult:
     message_id: str | None
+    rejected_recipients: dict[str, tuple[int, bytes]] | None = None
+
+    @property
+    def has_partial_failure(self) -> bool:
+        return bool(self.rejected_recipients)
 
 
 class SmtpSession:
@@ -36,7 +41,7 @@ class SmtpSession:
             if self._cfg.security == "starttls":
                 server.starttls(context=ssl.create_default_context())
                 server.ehlo()
-            if self._cfg.username and self._password:
+            if self._cfg.username:
                 server.login(self._cfg.username, self._password)
         except BaseException:
             try:
@@ -62,9 +67,11 @@ class SmtpSession:
         if self._smtp is None:
             raise RuntimeError("SMTP session 未建立")
         resp = self._smtp.send_message(msg)
-        # smtplib returns a dict of failed recipients; empty means success.
         if resp:
-            raise RuntimeError(f"部分收件人发送失败：{resp}")
+            return SmtpSendResult(
+                message_id=msg.get("Message-ID"),
+                rejected_recipients=resp,
+            )
         return SmtpSendResult(message_id=msg.get("Message-ID"))
 
 

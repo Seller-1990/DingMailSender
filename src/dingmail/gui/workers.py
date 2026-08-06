@@ -35,6 +35,8 @@ class DraftWorkerConfig:
     home_dir: Path
     imap_username: str
     imap_password: str
+    imap_host: str = DEFAULT_IMAP_HOST
+    imap_port: int = DEFAULT_IMAP_PORT_SSL
 
 
 class TestSmtpWorker(QtCore.QThread):
@@ -58,6 +60,7 @@ class TestSmtpWorker(QtCore.QThread):
 class SendTasksWorker(QtCore.QThread):
     finished_ok = QtCore.Signal(object)
     finished_err = QtCore.Signal(str)
+    progress = QtCore.Signal(int, int)
 
     def __init__(self, config: SendWorkerConfig) -> None:
         super().__init__()
@@ -66,6 +69,14 @@ class SendTasksWorker(QtCore.QThread):
         self._home_dir = config.home_dir
         self._smtp_cfg = config.smtp_cfg
         self._smtp_password = config.smtp_password
+        self._cancel_requested = False
+
+    def request_cancel(self) -> None:
+        self._cancel_requested = True
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self._cancel_requested
 
     def run(self) -> None:  # noqa: N802
         try:
@@ -79,16 +90,22 @@ class SendTasksWorker(QtCore.QThread):
                     smtp_security=self._smtp_cfg.security,
                     smtp_username=self._smtp_cfg.username,
                     smtp_password=self._smtp_password,
-                )
+                ),
+                progress_callback=self._on_progress,
+                cancel_check=lambda: self._cancel_requested,
             )
             self.finished_ok.emit(result)
         except Exception:
             self.finished_err.emit(traceback.format_exc())
 
+    def _on_progress(self, current: int, total: int) -> None:
+        self.progress.emit(current, total)
+
 
 class SaveDraftsWorker(QtCore.QThread):
     finished_ok = QtCore.Signal(object)
     finished_err = QtCore.Signal(str)
+    progress = QtCore.Signal(int, int)
 
     def __init__(self, config: DraftWorkerConfig) -> None:
         super().__init__()
@@ -97,6 +114,16 @@ class SaveDraftsWorker(QtCore.QThread):
         self._home_dir = config.home_dir
         self._imap_username = config.imap_username
         self._imap_password = config.imap_password
+        self._imap_host = config.imap_host
+        self._imap_port = config.imap_port
+        self._cancel_requested = False
+
+    def request_cancel(self) -> None:
+        self._cancel_requested = True
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self._cancel_requested
 
     def run(self) -> None:  # noqa: N802
         try:
@@ -107,10 +134,15 @@ class SaveDraftsWorker(QtCore.QThread):
                     home_dir=self._home_dir,
                     imap_username=self._imap_username,
                     imap_password=self._imap_password,
-                    imap_host=DEFAULT_IMAP_HOST,
-                    imap_port=DEFAULT_IMAP_PORT_SSL,
-                )
+                    imap_host=self._imap_host,
+                    imap_port=self._imap_port,
+                ),
+                progress_callback=self._on_progress,
+                cancel_check=lambda: self._cancel_requested,
             )
             self.finished_ok.emit(result)
         except Exception:
             self.finished_err.emit(traceback.format_exc())
+
+    def _on_progress(self, current: int, total: int) -> None:
+        self.progress.emit(current, total)

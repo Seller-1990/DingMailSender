@@ -5,6 +5,7 @@ from pathlib import Path
 
 from PySide6 import QtWidgets
 
+from ..constants import DEFAULT_IMAP_HOST, DEFAULT_IMAP_PORT_SSL
 from ..model import SmtpConfig
 from ..task_models import MailTask
 from .task_runtime import TaskRuntimeController
@@ -19,6 +20,8 @@ class MainWindowState:
     smtp_cfg: SmtpConfig = field(default_factory=SmtpConfig)
     smtp_password: str = ""
     smtp_connected: bool = False
+    imap_host: str = DEFAULT_IMAP_HOST
+    imap_port: int = DEFAULT_IMAP_PORT_SSL
     package_dir: Path | None = None
     tasks: list[MailTask] = field(default_factory=list)
     runtime: TaskRuntimeController = field(default_factory=TaskRuntimeController)

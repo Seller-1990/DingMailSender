@@ -27,6 +27,11 @@ from dingmail.task_service import RenderedTaskEmail
 class _FakeSmtpSendResult:
     def __init__(self, message_id: str | None) -> None:
         self.message_id = message_id
+        self.rejected_recipients = None
+
+    @property
+    def has_partial_failure(self) -> bool:
+        return bool(self.rejected_recipients)
 
 
 class _FakeSmtpSession:

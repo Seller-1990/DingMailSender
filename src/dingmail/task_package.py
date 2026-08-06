@@ -274,8 +274,12 @@ def _mail_task_from_row(row: tuple[object, ...], header_map: dict[str, int]) -> 
     def value(column: str) -> object:
         return _row_value(row, header_map, column)
 
-    # 任务ID 缺失时保留空串，由 ensure_unique_task_ids 统一修复并向调用方报告，
-    # 避免每次加载生成不同 ID 且不写回（曾导致额外列按 ID 关联失败被清空）。
+    scheduled_at: datetime | None = None
+    try:
+        scheduled_at = parse_datetime(value("定时发送时间"))
+    except ValueError:
+        pass
+
     return MailTask(
         task_id=str(value("任务ID") or "").strip(),
         enabled=parse_bool(value("是否启用")) if value("是否启用") is not None else True,
@@ -286,7 +290,7 @@ def _mail_task_from_row(row: tuple[object, ...], header_map: dict[str, int]) -> 
         markdown_path=str(value("Markdown路径") or "").strip(),
         attachment_paths=split_paths(str(value("附件路径") or "")),
         schedule_enabled=parse_bool(value("是否定时发送")),
-        scheduled_at=parse_datetime(value("定时发送时间")),
+        scheduled_at=scheduled_at,
         note=str(value("备注") or "").strip(),
     )
 

@@ -1,3 +1,4 @@
+DEFAULT_SMTP_HOST = "smtp.qiye.aliyun.com"
 DEFAULT_SMTP_PORT_SSL = 465
 DEFAULT_IMAP_HOST = "imap.qiye.aliyun.com"
 DEFAULT_IMAP_PORT_SSL = 993

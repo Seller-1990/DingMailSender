@@ -31,3 +31,8 @@ where = ["src"]
 [tool.ruff.lint.per-file-ignores]
 # Tests add src/ to sys.path so unittest discovery also works without installing the package.
 "tests/*.py" = ["E402"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
