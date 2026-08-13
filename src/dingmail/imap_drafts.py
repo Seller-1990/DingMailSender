@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import imaplib
 import re
+import ssl
 import time
 from email.message import EmailMessage
 
@@ -91,12 +92,14 @@ class ImapDraftsSession:
     def __enter__(self) -> "ImapDraftsSession":
         self._original_maxline = imaplib._MAXLINE  # type: ignore[attr-defined]
         imaplib._MAXLINE = max(imaplib._MAXLINE, 1_000_000)  # type: ignore[attr-defined]
-        session = imaplib.IMAP4_SSL(self._host, self._port, timeout=self._timeout_seconds)
+        ctx = ssl.create_default_context()
+        session = imaplib.IMAP4_SSL(self._host, self._port, ssl_context=ctx, timeout=self._timeout_seconds)
         try:
             session.login(self._username, self._password)
             self._imap = session
             self._drafts_mailbox = self._discover_drafts_mailbox()
         except BaseException:
+            imaplib._MAXLINE = self._original_maxline  # type: ignore[attr-defined]
             self._imap = None
             self._drafts_mailbox = None
             try:
@@ -118,6 +121,18 @@ class ImapDraftsSession:
             pass
         self._imap = None
         imaplib._MAXLINE = self._original_maxline  # type: ignore[attr-defined]
+
+    def reconnect(self) -> None:
+        """关闭当前连接并重新建立 IMAP 会话。用于 session error 后的恢复。"""
+        if self._imap is not None:
+            try:
+                self._imap.logout()
+            except Exception:
+                pass
+            self._imap = None
+        imaplib._MAXLINE = self._original_maxline  # type: ignore[attr-defined]
+        # 重新执行连接逻辑
+        self.__enter__()
 
     def append_draft(self, msg: EmailMessage) -> str:
         if self._imap is None:

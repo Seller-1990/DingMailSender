@@ -115,7 +115,7 @@ class TaskDeliveryTests(unittest.TestCase):
         with (
             patch("dingmail.task_delivery.SmtpSession", _FakeSmtpSession),
             patch("dingmail.task_delivery.render_task_email", return_value=self.rendered),
-            patch("dingmail.task_delivery.rate_limit_sleep", side_effect=lambda seconds: sleep_calls.append(seconds)),
+            patch("dingmail.task_delivery._sleep_between_tasks", side_effect=lambda *args, **kwargs: sleep_calls.append(args[2]) if len(args) > 2 and args[0] < args[1] else None),
         ):
             result = send_tasks(
                 SendTasksConfig(
@@ -162,7 +162,7 @@ class TaskDeliveryTests(unittest.TestCase):
             patch.dict(os.environ, {"DINGMAIL_SAVE_DEBUG_ARTIFACTS": ""}),
             patch("dingmail.task_delivery.SmtpSession", _FakeSmtpSession),
             patch("dingmail.task_delivery.render_task_email", return_value=self.rendered),
-            patch("dingmail.task_delivery.rate_limit_sleep"),
+            patch("dingmail.task_delivery._sleep_between_tasks"),
         ):
             result = send_tasks(
                 SendTasksConfig(
@@ -189,7 +189,7 @@ class TaskDeliveryTests(unittest.TestCase):
             patch.dict(os.environ, {"DINGMAIL_SAVE_DEBUG_ARTIFACTS": "1"}),
             patch("dingmail.task_delivery.SmtpSession", _FakeSmtpSession),
             patch("dingmail.task_delivery.render_task_email", return_value=self.rendered),
-            patch("dingmail.task_delivery.rate_limit_sleep"),
+            patch("dingmail.task_delivery._sleep_between_tasks"),
         ):
             result = send_tasks(
                 SendTasksConfig(
@@ -214,7 +214,7 @@ class TaskDeliveryTests(unittest.TestCase):
         with (
             patch("dingmail.task_delivery.ImapDraftsSession", _FakeImapDraftsSession),
             patch("dingmail.task_delivery.render_task_email", return_value=self.rendered),
-            patch("dingmail.task_delivery.rate_limit_sleep", side_effect=lambda seconds: sleep_calls.append(seconds)),
+            patch("dingmail.task_delivery._sleep_between_tasks", side_effect=lambda *args, **kwargs: sleep_calls.append(args[2]) if len(args) > 2 and args[0] < args[1] else None),
         ):
             result = save_tasks_to_imap_drafts(
                 DraftsConfig(
@@ -236,7 +236,7 @@ class TaskDeliveryTests(unittest.TestCase):
         with (
             patch("dingmail.task_delivery.SmtpSession", _DisconnectingSmtpSession),
             patch("dingmail.task_delivery.render_task_email", return_value=self.rendered),
-            patch("dingmail.task_delivery.rate_limit_sleep", side_effect=lambda seconds: sleep_calls.append(seconds)),
+            patch("dingmail.task_delivery._sleep_between_tasks", side_effect=lambda *args, **kwargs: sleep_calls.append(args[2]) if len(args) > 2 and args[0] < args[1] else None),
         ):
             result = send_tasks(
                 SendTasksConfig(
@@ -274,7 +274,7 @@ class TaskDeliveryTests(unittest.TestCase):
         with (
             patch("dingmail.task_delivery.ImapDraftsSession", _AbortingImapDraftsSession),
             patch("dingmail.task_delivery.render_task_email", return_value=self.rendered),
-            patch("dingmail.task_delivery.rate_limit_sleep"),
+            patch("dingmail.task_delivery._sleep_between_tasks"),
         ):
             result = save_tasks_to_imap_drafts(
                 DraftsConfig(

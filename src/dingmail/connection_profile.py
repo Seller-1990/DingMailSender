@@ -37,6 +37,10 @@ class DataBlob(ctypes.Structure):
     ]
 
 
+# 应用级固定熵值，提高同用户进程直接解密的门槛
+_APP_ENTROPY = b"DingMailSender-v1-credential-entropy"
+
+
 def _protect_secret(secret: str) -> tuple[str, str]:
     if not secret:
         return "plain", ""
@@ -46,11 +50,13 @@ def _protect_secret(secret: str) -> tuple[str, str]:
     raw = secret.encode("utf-8")
     buffer = ctypes.create_string_buffer(raw)
     in_blob = DataBlob(len(raw), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
+    entropy_buffer = ctypes.create_string_buffer(_APP_ENTROPY)
+    entropy_blob = DataBlob(len(_APP_ENTROPY), ctypes.cast(entropy_buffer, ctypes.POINTER(ctypes.c_char)))
     out_blob = DataBlob()
     if not ctypes.windll.crypt32.CryptProtectData(  # type: ignore[attr-defined]
         ctypes.byref(in_blob),
         None,
-        None,
+        ctypes.byref(entropy_blob),
         None,
         None,
         0,
@@ -76,23 +82,46 @@ def _unprotect_secret(mode: str, payload: str) -> str:
     protected = base64.b64decode(payload.encode("ascii"))
     in_buffer = ctypes.create_string_buffer(protected)
     in_blob = DataBlob(len(protected), ctypes.cast(in_buffer, ctypes.POINTER(ctypes.c_char)))
+    entropy_buffer = ctypes.create_string_buffer(_APP_ENTROPY)
+    entropy_blob = DataBlob(len(_APP_ENTROPY), ctypes.cast(entropy_buffer, ctypes.POINTER(ctypes.c_char)))
     out_blob = DataBlob()
-    if not ctypes.windll.crypt32.CryptUnprotectData(  # type: ignore[attr-defined]
+
+    # 先用应用熵尝试解密（新版加密格式）
+    if ctypes.windll.crypt32.CryptUnprotectData(  # type: ignore[attr-defined]
         ctypes.byref(in_blob),
         None,
-        None,
+        ctypes.byref(entropy_blob),
         None,
         None,
         0,
         ctypes.byref(out_blob),
     ):
-        raise OSError("无法解密 SMTP 授权码")
+        try:
+            raw = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+            return raw.decode("utf-8")
+        finally:
+            ctypes.windll.kernel32.LocalFree(ctypes.cast(out_blob.pbData, ctypes.c_void_p))  # type: ignore[attr-defined]
 
-    try:
-        raw = ctypes.string_at(out_blob.pbData, out_blob.cbData)
-        return raw.decode("utf-8")
-    finally:
-        ctypes.windll.kernel32.LocalFree(ctypes.cast(out_blob.pbData, ctypes.c_void_p))  # type: ignore[attr-defined]
+    # Fallback：尝试无熵解密（兼容旧版加密的凭据）
+    in_buffer2 = ctypes.create_string_buffer(protected)
+    in_blob2 = DataBlob(len(protected), ctypes.cast(in_buffer2, ctypes.POINTER(ctypes.c_char)))
+    out_blob2 = DataBlob()
+    if ctypes.windll.crypt32.CryptUnprotectData(  # type: ignore[attr-defined]
+        ctypes.byref(in_blob2),
+        None,
+        None,
+        None,
+        None,
+        0,
+        ctypes.byref(out_blob2),
+    ):
+        try:
+            raw = ctypes.string_at(out_blob2.pbData, out_blob2.cbData)
+            return raw.decode("utf-8")
+        finally:
+            ctypes.windll.kernel32.LocalFree(ctypes.cast(out_blob2.pbData, ctypes.c_void_p))  # type: ignore[attr-defined]
+
+    raise OSError("无法解密 SMTP 授权码")
 
 
 def _read_connection_profile(path: Path, *, is_legacy_source: bool) -> ConnectionProfileLoadResult:

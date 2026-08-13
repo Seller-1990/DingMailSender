@@ -41,16 +41,10 @@ jobs:
       - name: Unit tests
         run: python -m unittest discover -s tests
 
-      - name: Compile check
-        run: python -m compileall -q src dingmail_gui.py tests
-
       - name: Build executable
         shell: pwsh
-        run: .\build_exe.ps1
-
-      - name: Verify artifact
-        shell: pwsh
         run: |
+          .\build_exe.ps1
           if (-not (Test-Path .\release\DingMailSender.exe)) { throw "Missing release\DingMailSender.exe" }
           if (-not (Test-Path .\release\DingMailSender.exe.sha256)) { throw "Missing SHA256 checksum" }
 

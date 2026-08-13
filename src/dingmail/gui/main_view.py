@@ -176,13 +176,18 @@ class MainViewMixin:
 
     def _exit_from_tray(self) -> None:
         if self._delivery_worker_active():
-            # QThread 运行中销毁会导致进程 abort，批次中断且重试会产生重复草稿。
-            QtWidgets.QMessageBox.information(
-                self,
-                "正在执行任务",
-                "当前正在发送或保存草稿，请等待本轮任务完成后再退出程序。",
-            )
-            return
+            self._cancel_current_delivery()
+            # 等待 worker 线程结束，避免 QThread 析构时进程 abort
+            for worker in (self._send_worker, self._draft_worker):
+                if worker is not None:
+                    if not worker.wait(10000):  # 最多等 10 秒
+                        # 超时仍在运行，提示用户
+                        QtWidgets.QMessageBox.information(
+                            self,
+                            "等待任务结束",
+                            "正在等待后台任务安全停止，请稍候再重试退出。",
+                        )
+                        return
         if self._runtime.queued_task_ids:
             reply = QtWidgets.QMessageBox.question(
                 self,
@@ -196,12 +201,19 @@ class MainViewMixin:
 
     def _handle_close_event(self, event: QtGui.QCloseEvent) -> None:
         if self._delivery_worker_active() and (self._quit_requested or self._tray is None):
-            QtWidgets.QMessageBox.information(
-                self,
-                "正在执行任务",
-                "当前正在发送或保存草稿，请等待本轮任务完成后再退出。",
-            )
-            event.ignore()
+            # 尝试取消并等待
+            self._cancel_current_delivery()
+            for worker in (self._send_worker, self._draft_worker):
+                if worker is not None:
+                    if not worker.wait(5000):
+                        QtWidgets.QMessageBox.information(
+                            self,
+                            "正在执行任务",
+                            "当前正在发送或保存草稿，请等待本轮任务完成后再退出。",
+                        )
+                        event.ignore()
+                        return
+            event.accept()
             return
 
         if self._quit_requested or self._tray is None:

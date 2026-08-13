@@ -63,6 +63,20 @@ class SmtpSession:
                     pass
         self._smtp = None
 
+    def reconnect(self) -> None:
+        """关闭当前连接并重新建立 SMTP 会话。用于 session error 后的恢复。"""
+        if self._smtp is not None:
+            try:
+                self._smtp.quit()
+            except Exception:
+                try:
+                    self._smtp.close()
+                except Exception:
+                    pass
+            self._smtp = None
+        # 重新执行连接逻辑
+        self.__enter__()
+
     def send(self, msg: EmailMessage) -> SmtpSendResult:
         if self._smtp is None:
             raise RuntimeError("SMTP session 未建立")

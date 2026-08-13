@@ -129,8 +129,10 @@ class TaskPackageTests(unittest.TestCase):
         saved = openpyxl.load_workbook(self.package_dir / TASKS_FILENAME)
         self.addCleanup(saved.close)
         sheet = saved[TASKS_SHEET_NAME]
-        self.assertEqual("人工复核备注", sheet.cell(row=1, column=13).value)
-        self.assertEqual("保留这列", sheet.cell(row=2, column=13).value)
+        # "最近结果" is now standard column 13; user extra "人工复核备注" moves to 14
+        self.assertEqual("最近结果", sheet.cell(row=1, column=13).value)
+        self.assertEqual("人工复核备注", sheet.cell(row=1, column=14).value)
+        self.assertEqual("保留这列", sheet.cell(row=2, column=14).value)
         self.assertEqual("新主题", sheet.cell(row=2, column=5).value)
 
     def test_ensure_unique_task_ids_repairs_missing_and_duplicate_ids(self) -> None:
@@ -180,8 +182,9 @@ class TaskPackageTests(unittest.TestCase):
         workbook = openpyxl.load_workbook(self.package_dir / TASKS_FILENAME)
         self.addCleanup(workbook.close)
         sheet = workbook[TASKS_SHEET_NAME]
+        # User extra column "部门" is now at column 14 (after new standard "最近结果" at 13)
         return [
-            (sheet.cell(row=row, column=1).value, sheet.cell(row=row, column=13).value)
+            (sheet.cell(row=row, column=1).value, sheet.cell(row=row, column=14).value)
             for row in range(2, sheet.max_row + 1)
         ]
 

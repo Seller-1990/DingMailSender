@@ -38,3 +38,4 @@ dingmail-workbench-*.png
 
 # Secrets
 conn_profile.json
+.zcode/

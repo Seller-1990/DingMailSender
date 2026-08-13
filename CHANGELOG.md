@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-13
+
+### Added
+
+- 单实例互斥锁：防止多实例并行运行导致数据覆盖和重复发送。
+- SMTP/IMAP 断线自动重连：session error 后尝试重建连接继续剩余任务，而非直接跳过全部。
+- 发送状态持久化：`tasks.xlsx` 新增「最近结果」列，崩溃后重启可恢复已发送状态，防止重复发送。
+- 可中断的 rate_limit_sleep：取消信号每 0.1 秒检查一次，取消延迟从秒级降至百毫秒级。
+- 增量校验：首次加载大量任务时分批校验（每 100ms 处理 5 个），避免 UI 冻结。
+- DPAPI 应用级熵值：加密凭据时传入固定 entropy，提高同用户恶意进程窃取密码的门槛。
+
+### Fixed
+
+- Excel 保存时文件被占用不再丢失数据：PermissionError 时保留 tmp 文件供用户恢复。
+- 退出程序时安全等待 worker 结束（cancel + wait），避免 QThread 析构导致进程 abort。
+- IMAP 连接显式传入 `ssl_context`，与 SMTP 保持一致，消除隐式安全依赖。
+- `imaplib._MAXLINE` 在 `__enter__` 失败时正确恢复，不再泄漏全局修改。
+- DPAPI 解密兼容旧版无熵加密格式（fallback 机制）。
+
+### Changed
+
+- CI 流水线精简：移除冗余的 `compileall` 步骤，合并 artifact 验证到构建步骤。
+
 ## [0.3.0] - 2026-08-06
 
 ### Added

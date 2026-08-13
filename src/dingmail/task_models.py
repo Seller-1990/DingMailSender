@@ -17,6 +17,7 @@ class MailTask:
     schedule_enabled: bool = False
     scheduled_at: datetime | None = None
     note: str = ""
+    last_delivery_status: str = ""  # 持久化发送结果：sent / draft_saved / send_failed 等
 
     def attachment_count(self) -> int:
         return len([x for x in self.attachment_paths if str(x).strip()])

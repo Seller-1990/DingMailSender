@@ -4,6 +4,7 @@ import imaplib
 import logging
 import smtplib
 import ssl
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -27,7 +28,7 @@ from .run_store import (
     redact_text,
     snapshot_file,
 )
-from .smtp_sender import SmtpSession, rate_limit_sleep
+from .smtp_sender import SmtpSession
 from .task_models import MailTask
 from .task_package import PACKAGE_README_FILENAME, TASKS_FILENAME
 from .task_service import RenderedTaskEmail, render_task_email
@@ -235,9 +236,23 @@ def _write_task_artifacts(artifacts: TaskArtifacts) -> None:
     (artifacts.run_paths.eml_dir / f"{base}.eml").write_bytes(artifacts.message.as_bytes())
 
 
-def _sleep_between_tasks(index: int, total: int, rate_limit_seconds: float) -> None:
-    if index < total:
-        rate_limit_sleep(rate_limit_seconds)
+def _sleep_between_tasks(
+    index: int,
+    total: int,
+    rate_limit_seconds: float,
+    cancel_check: Callable[[], bool] | None = None,
+) -> None:
+    """可中断的任务间等待。每 0.1 秒检查一次取消信号。"""
+    if index >= total:
+        return
+    if rate_limit_seconds <= 0:
+        return
+    deadline = time.monotonic() + rate_limit_seconds
+    while time.monotonic() < deadline:
+        if cancel_check and cancel_check():
+            return
+        remaining = deadline - time.monotonic()
+        time.sleep(min(0.1, max(0, remaining)))
 
 
 def _snapshot_package_files(package_dir: Path, run_paths: RunPaths) -> None:
@@ -376,18 +391,24 @@ def send_tasks(
                 if progress_callback:
                     progress_callback(index, total)
                 if session_error is not None:
-                    outcomes.extend(
-                        _skip_remaining_tasks(
-                            tasks=config.tasks[index:],
-                            start_idx=index + 1,
-                            status=DeliveryStatus.SEND_SKIPPED,
-                            reason=str(session_error),
-                            manifest_csv=run_paths.manifest_csv,
-                            logger=logger,
+                    # 尝试重连一次，成功则继续剩余任务
+                    try:
+                        smtp.reconnect()
+                        logger.info("reconnect_ok after session_error: %s", redact_text(str(session_error)))
+                    except Exception as reconnect_exc:
+                        logger.error("reconnect_failed: %s", redact_text(str(reconnect_exc)))
+                        outcomes.extend(
+                            _skip_remaining_tasks(
+                                tasks=config.tasks[index:],
+                                start_idx=index + 1,
+                                status=DeliveryStatus.SEND_SKIPPED,
+                                reason=str(session_error),
+                                manifest_csv=run_paths.manifest_csv,
+                                logger=logger,
+                            )
                         )
-                    )
-                    break
-                _sleep_between_tasks(index, total, config.rate_limit_seconds)
+                        break
+                _sleep_between_tasks(index, total, config.rate_limit_seconds, cancel_check)
         return SendTasksResult(run_paths=run_paths, outcomes=outcomes)
     finally:
         _close_logger(logger)
@@ -483,18 +504,24 @@ def save_tasks_to_imap_drafts(
                 if progress_callback:
                     progress_callback(index, total)
                 if session_error is not None:
-                    outcomes.extend(
-                        _skip_remaining_tasks(
-                            tasks=config.tasks[index:],
-                            start_idx=index + 1,
-                            status=DeliveryStatus.DRAFT_SKIPPED,
-                            reason=str(session_error),
-                            manifest_csv=run_paths.manifest_csv,
-                            logger=logger,
+                    # 尝试重连一次，成功则继续剩余任务
+                    try:
+                        drafts.reconnect()
+                        logger.info("imap_reconnect_ok after session_error: %s", redact_text(str(session_error)))
+                    except Exception as reconnect_exc:
+                        logger.error("imap_reconnect_failed: %s", redact_text(str(reconnect_exc)))
+                        outcomes.extend(
+                            _skip_remaining_tasks(
+                                tasks=config.tasks[index:],
+                                start_idx=index + 1,
+                                status=DeliveryStatus.DRAFT_SKIPPED,
+                                reason=str(session_error),
+                                manifest_csv=run_paths.manifest_csv,
+                                logger=logger,
+                            )
                         )
-                    )
-                    break
-                _sleep_between_tasks(index, total, config.rate_limit_seconds)
+                        break
+                _sleep_between_tasks(index, total, config.rate_limit_seconds, cancel_check)
         return SendTasksResult(run_paths=run_paths, outcomes=outcomes)
     finally:
         _close_logger(logger)

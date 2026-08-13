@@ -45,6 +45,16 @@ class TaskRuntimeController:
         self.drafting_task_ids.clear()
         self._states = {task.task_id: TaskRuntimeState() for task in tasks}
 
+        # 从持久化的 last_delivery_status 恢复终态，防止崩溃后重复发送
+        for task in tasks:
+            persisted = task.last_delivery_status.strip().lower()
+            if persisted in ("sent", "send_error", "send_skipped"):
+                self._states[task.task_id].status = TaskStatus.SENT if persisted == "sent" else TaskStatus.SEND_FAILED
+                self._states[task.task_id].last_result = persisted
+            elif persisted in ("draft_saved", "draft_error", "draft_skipped"):
+                self._states[task.task_id].status = TaskStatus.DRAFT_SAVED if persisted == "draft_saved" else TaskStatus.DRAFT_FAILED
+                self._states[task.task_id].last_result = persisted
+
         for task in tasks:
             if task.task_id not in previous_queued_ids or not task.enabled or not task.schedule_enabled:
                 continue
@@ -118,15 +128,38 @@ class TaskRuntimeController:
                 valid.append(task)
         return valid, blocked
 
-    def refresh_runtime_state(self, tasks: list[MailTask]) -> None:
+    def refresh_runtime_state(self, tasks: list[MailTask], *, max_validate: int = 0) -> bool:
+        """刷新任务运行时状态。
+
+        Args:
+            max_validate: 每次最多校验的未缓存任务数。0 表示不限制（全量校验）。
+
+        Returns:
+            True 表示所有任务都已完成校验，False 表示还有待校验任务（需要再次调用）。
+        """
         if not self._package_dir:
-            return
+            return True
+        unchecked_count = 0
         for task in tasks:
             state = self.state_for(task)
             if not task.enabled:
                 state.status = TaskStatus.DISABLED
                 state.error_message = ""
                 continue
+            # 检查缓存是否命中
+            if max_validate > 0:
+                signature = self._task_validation_signature(task)
+                cached = self._validation_cache.get(task.task_id)
+                if cached is None or cached[0] != signature:
+                    unchecked_count += 1
+                    if unchecked_count > max_validate:
+                        # 超出本轮限制，跳过（保持 UNCHECKED 状态）
+                        if state.status == TaskStatus.UNCHECKED:
+                            continue
+                        elif state.status not in TaskStatus.terminal_statuses() and task.task_id not in self.sending_task_ids and task.task_id not in self.drafting_task_ids and task.task_id not in self.queued_task_ids:
+                            state.status = TaskStatus.UNCHECKED
+                            continue
+                        continue
             errors = self.validate_task(task, check_schedule_time=False)
             if errors:
                 state.status = TaskStatus.VALIDATION_FAILED
@@ -146,6 +179,10 @@ class TaskRuntimeController:
                 continue
             state.status = TaskStatus.READY
             state.error_message = ""
+        # 返回是否全部完成
+        if max_validate > 0 and unchecked_count > max_validate:
+            return False
+        return True
 
     def mark_sending(self, tasks: list[MailTask]) -> None:
         for task in tasks:

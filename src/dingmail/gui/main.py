@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
@@ -49,6 +50,12 @@ class MainWindow(MainUiMixin, MainViewMixin, MainTaskMixin, MainDeliveryMixin, Q
         self._schedule_timer.setInterval(SCHEDULE_CHECK_INTERVAL_MS)
         self._schedule_timer.timeout.connect(self._process_scheduled_tasks)
         self._schedule_timer.start()
+
+        # 增量校验 timer：首次加载大量任务时避免 UI 冻结
+        self._validate_timer = QtCore.QTimer(self)
+        self._validate_timer.setInterval(100)
+        self._validate_timer.timeout.connect(self._incremental_validate)
+
         self._apply_styles()
         self._refresh_ui_state()
         if self._connection_profile_error:
@@ -160,22 +167,64 @@ class MainWindow(MainUiMixin, MainViewMixin, MainTaskMixin, MainDeliveryMixin, Q
             return
         QtWidgets.QMessageBox.warning(self, "连接配置需要迁移", self._connection_profile_warning)
 
+    def _incremental_validate(self) -> None:
+        """增量校验：每轮最多校验 5 个任务，避免首次加载时 UI 冻结。"""
+        if not self._tasks:
+            self._validate_timer.stop()
+            return
+        all_done = self._runtime.refresh_runtime_state(self._tasks, max_validate=5)
+        self._refresh_task_table()
+        self._refresh_metrics()
+        if all_done:
+            self._validate_timer.stop()
+
+    def _start_incremental_validation(self) -> None:
+        """启动增量校验 timer。"""
+        if not self._validate_timer.isActive():
+            self._validate_timer.start()
+
+
+_INSTANCE_LOCK_PORT = 29517  # 应用专用端口，用于单实例互斥
+
+
+def _acquire_single_instance_lock() -> socket.socket | None:
+    """尝试绑定本地端口实现单实例互斥。成功返回 socket，已有实例运行时返回 None。"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", _INSTANCE_LOCK_PORT))
+        sock.listen(1)
+        return sock
+    except OSError:
+        sock.close()
+        return None
+
 
 def run() -> int:
     app = QtWidgets.QApplication([])
-    try:
-        window = MainWindow()
-    except Exception as exc:
-        QtWidgets.QMessageBox.critical(
+    lock = _acquire_single_instance_lock()
+    if lock is None:
+        QtWidgets.QMessageBox.warning(
             None,
-            "启动失败",
-            "程序初始化失败，可能是无法创建或访问工作目录。\n"
-            f"{exc}\n\n"
-            "请把程序放到可写目录后重试，或设置环境变量 DINGMAIL_HOME 指定工作目录。",
+            "已有实例运行",
+            "DingMailSender 已在运行中，请勿重复启动。\n如果确认没有其他实例，请稍后重试。",
         )
         return 1
-    window.show()
-    return app.exec()
+    try:
+        try:
+            window = MainWindow()
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                None,
+                "启动失败",
+                "程序初始化失败，可能是无法创建或访问工作目录。\n"
+                f"{exc}\n\n"
+                "请把程序放到可写目录后重试，或设置环境变量 DINGMAIL_HOME 指定工作目录。",
+            )
+            return 1
+        window.show()
+        return app.exec()
+    finally:
+        lock.close()
 
 
 def _state_property(name: str):

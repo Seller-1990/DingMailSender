@@ -10,6 +10,7 @@ from PySide6 import QtCore, QtWidgets
 from ..constants import DEFAULT_IMAP_HOST, DEFAULT_IMAP_PORT_SSL
 from ..task_delivery import DeliveryStatus, SendTasksResult
 from ..task_models import MailTask
+from ..task_package import save_tasks_to_package
 from ..task_status import TaskStatus
 from .main_support import error_summary
 from .workers import DraftWorkerConfig, SaveDraftsWorker, SendTasksWorker, SendWorkerConfig
@@ -218,6 +219,8 @@ class MainDeliveryMixin:
             sent_count, failed_count = self._runtime.apply_send_result(tasks, result)
         else:
             sent_count, failed_count = self._send_result_counts(result)
+        # 回写发送状态到 tasks.xlsx，防止崩溃后重复发送
+        self._persist_delivery_status(tasks, result, package_dir)
         self._refresh_task_table()
         self._refresh_ui_state()
         details = self._format_failure_details(result)
@@ -235,6 +238,8 @@ class MainDeliveryMixin:
             ok_count, fail_count = self._runtime.apply_draft_result(tasks, result)
         else:
             ok_count, fail_count = self._draft_result_counts(result)
+        # 回写草稿状态到 tasks.xlsx
+        self._persist_delivery_status(tasks, result, package_dir)
         self._refresh_task_table()
         self._refresh_ui_state()
         details = self._format_failure_details(result)
@@ -245,6 +250,23 @@ class MainDeliveryMixin:
             f"{self._skipped_note(self._result_skipped_count(result))}"
             f"{details}",
         )
+
+    def _persist_delivery_status(self, tasks: list[MailTask], result: SendTasksResult, package_dir: Path) -> None:
+        """将发送/草稿结果回写到 tasks.xlsx 的 '最近结果' 列。"""
+        outcome_map = {outcome.task_id: outcome for outcome in result.outcomes}
+        changed = False
+        for task in self._tasks:
+            outcome = outcome_map.get(task.task_id)
+            if outcome is not None:
+                new_status = outcome.status.value
+                if task.last_delivery_status != new_status:
+                    task.last_delivery_status = new_status
+                    changed = True
+        if changed and package_dir and package_dir.is_dir():
+            try:
+                save_tasks_to_package(package_dir, self._tasks)
+            except Exception:
+                pass  # 回写失败不阻断用户流程，下次发送仍可正常进行
 
     @staticmethod
     def _format_failure_details(result: SendTasksResult) -> str:

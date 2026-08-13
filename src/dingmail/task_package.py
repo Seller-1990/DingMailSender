@@ -30,6 +30,7 @@ TASK_COLUMNS = [
     "是否定时发送",
     "定时发送时间",
     "备注",
+    "最近结果",
 ]
 
 ExtraColumnState = tuple[range, dict[int, object]]
@@ -172,24 +173,49 @@ def _task_row_values(task: MailTask) -> list[object]:
         "是" if task.schedule_enabled else "否",
         datetime_to_excel_text(task.scheduled_at),
         task.note,
+        task.last_delivery_status,
     ]
 
 
 def _snapshot_extra_task_columns(
     worksheet,
 ) -> tuple[range, dict[int, object], dict[str, dict[int, object]], dict[int, dict[int, object]]]:
-    extra_start = len(TASK_COLUMNS) + 1
-    extra_columns = range(extra_start, worksheet.max_column + 1)
-    extra_headers = {col: worksheet.cell(row=1, column=col).value for col in extra_columns}
+    """Snapshot user-added columns that are not in TASK_COLUMNS.
+
+    Handles backward compatibility: old files may have fewer standard columns,
+    so we identify extra columns by header name rather than position.
+    """
+    task_columns_set = set(TASK_COLUMNS)
+    new_extra_start = len(TASK_COLUMNS) + 1
+
+    # Identify which file columns have headers NOT in our standard set
+    file_extra_cols: list[int] = []
+    for col in range(1, worksheet.max_column + 1):
+        header = worksheet.cell(row=1, column=col).value
+        header_str = str(header).strip() if header is not None else ""
+        if header_str and header_str not in task_columns_set:
+            file_extra_cols.append(col)
+
+    if not file_extra_cols:
+        empty_range = range(new_extra_start, new_extra_start)
+        return empty_range, {}, {}, {}
+
+    # Remap file extra columns to sequential positions starting after TASK_COLUMNS
+    remap: dict[int, int] = {}  # old_col -> new_col
+    for offset, old_col in enumerate(file_extra_cols):
+        remap[old_col] = new_extra_start + offset
+
+    extra_columns = range(new_extra_start, new_extra_start + len(file_extra_cols))
+    extra_headers = {remap[col]: worksheet.cell(row=1, column=col).value for col in file_extra_cols}
+
     extra_values_by_task_id: dict[str, dict[int, object]] = {}
     extra_values_by_row: dict[int, dict[int, object]] = {}
     for row_index in range(2, worksheet.max_row + 1):
-        values = {col: worksheet.cell(row=row_index, column=col).value for col in extra_columns}
+        values = {remap[col]: worksheet.cell(row=row_index, column=col).value for col in file_extra_cols}
         task_id = str(worksheet.cell(row=row_index, column=1).value or "").strip()
         if task_id and task_id not in extra_values_by_task_id:
             extra_values_by_task_id[task_id] = values
         else:
-            # 任务ID 缺失或与前行重复时无法按 ID 关联，按行位置兜底，避免用户自加列被清空。
             extra_values_by_row[row_index] = values
     return extra_columns, extra_headers, extra_values_by_task_id, extra_values_by_row
 
@@ -292,6 +318,7 @@ def _mail_task_from_row(row: tuple[object, ...], header_map: dict[str, int]) -> 
         schedule_enabled=parse_bool(value("是否定时发送")),
         scheduled_at=scheduled_at,
         note=str(value("备注") or "").strip(),
+        last_delivery_status=str(value("最近结果") or "").strip(),
     )
 
 
@@ -324,8 +351,15 @@ def save_tasks_to_package(package_dir: Path, tasks: list[MailTask]) -> Path:
         try:
             workbook.save(tmp_path)
             os.replace(tmp_path, tasks_path)
-        finally:
+        except PermissionError:
+            # 文件被 Excel 等程序占用时 os.replace 失败——保留 tmp 让用户可恢复
+            raise PermissionError(
+                f"无法保存 {tasks_path.name}：文件可能被 Excel 或其他程序占用。\n"
+                f"修改内容已暂存到：{tmp_path.name}，请关闭占用程序后重试。"
+            ) from None
+        except BaseException:
             tmp_path.unlink(missing_ok=True)
+            raise
     finally:
         workbook.close()
     return tasks_path

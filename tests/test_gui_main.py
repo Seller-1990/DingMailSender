@@ -72,6 +72,12 @@ class _FakeWorker:
     def start(self) -> None:
         self.started = True
 
+    def request_cancel(self) -> None:
+        pass
+
+    def wait(self, timeout: int = 0) -> bool:
+        return True
+
 
 class MainWindowGuiTests(unittest.TestCase):
     @classmethod
@@ -347,7 +353,9 @@ class MainWindowGuiTests(unittest.TestCase):
     def test_exit_from_tray_blocked_while_delivery_worker_running(self) -> None:
         window = self._create_window()
         window._tray = _FakeTray()
-        window._draft_worker = _FakeWorker()
+        worker = _FakeWorker()
+        worker.wait = lambda timeout=0: False  # simulate wait timeout
+        window._draft_worker = worker
 
         with (
             patch.object(QtWidgets.QMessageBox, "information") as info_mock,
@@ -362,7 +370,9 @@ class MainWindowGuiTests(unittest.TestCase):
     def test_close_event_blocked_without_tray_while_delivery_worker_running(self) -> None:
         window = self._create_window()
         window._tray = None
-        window._send_worker = _FakeWorker()
+        worker = _FakeWorker()
+        worker.wait = lambda timeout=0: False  # simulate wait timeout
+        window._send_worker = worker
 
         event = QtGui.QCloseEvent()
         with patch.object(QtWidgets.QMessageBox, "information") as info_mock:
