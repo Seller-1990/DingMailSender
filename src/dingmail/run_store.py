@@ -124,3 +124,25 @@ def snapshot_file(src: Path, dst_dir: Path, dst_name: str) -> None:
         return
     dst = dst_dir / dst_name
     shutil.copy2(src, dst)
+
+
+def cleanup_old_runs(runs_root: Path, retention_days: int) -> int:
+    """删除 mtime 早于保留期的运行记录目录，返回删除数量。
+
+    retention_days<=0 表示永久保留（不清理）。单个目录删除失败不中断其余清理。
+    """
+    if retention_days <= 0 or not runs_root.is_dir():
+        return 0
+    cutoff = dt.datetime.now().timestamp() - retention_days * 86400
+    removed = 0
+    for path in runs_root.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            if path.stat().st_mtime >= cutoff:
+                continue
+            shutil.rmtree(path)
+            removed += 1
+        except OSError:
+            continue
+    return removed

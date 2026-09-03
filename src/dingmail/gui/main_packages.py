@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..paths import packages_dir, program_dir, runs_dir
+from ..run_store import cleanup_old_runs
 from ..task_package import (
     PACKAGE_README_FILENAME,
     TASKS_FILENAME,
@@ -80,7 +82,7 @@ class MainPackageMixin:
         except Exception as exc:
             self._show_error_dialog("重新加载失败", f"重新加载任务包失败：{exc}")
 
-    def _load_package(self, package_dir: Path) -> None:
+    def _load_package(self, package_dir: Path, *, silent: bool = False) -> None:
         tasks = load_tasks_from_package(package_dir)
         repairs = ensure_unique_task_ids(tasks)
         repair_notice = ""
@@ -92,11 +94,93 @@ class MainPackageMixin:
                 repair_notice = "\n".join(repairs[:10]) + f"\n\n任务ID已在内存中修复，但写回 tasks.xlsx 失败：{exc}"
         self._package_dir = package_dir
         self._tasks = tasks
+        self._task_model.set_data_source(self._tasks, self._runtime)
         self._runtime.reset_loaded_tasks(package_dir, self._tasks)
         self._refresh_task_table()
         self._refresh_ui_state()
+        self._start_incremental_validation()
+        self._save_app_state()
         if repair_notice:
-            QtWidgets.QMessageBox.warning(self, "任务ID已自动修复", repair_notice)
+            if silent:
+                # 启动自动恢复时不弹窗打断，只用状态栏提示
+                self.statusBar().showMessage("已恢复任务包；缺失/重复的任务ID已自动修复。", 10000)
+            else:
+                QtWidgets.QMessageBox.warning(self, "任务ID已自动修复", repair_notice)
+
+    def _app_state_path(self) -> Path:
+        return self._home_dir / "state.json"
+
+    def _load_app_state(self) -> None:
+        """启动时读取应用级设置；字段缺失/非法时保留默认值。"""
+        try:
+            raw = json.loads(self._app_state_path().read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(raw, dict):
+            return
+        try:
+            rate_limit = float(raw.get("send_rate_limit_seconds", self._send_rate_limit_seconds))
+        except (TypeError, ValueError):
+            rate_limit = self._send_rate_limit_seconds
+        try:
+            retention = int(raw.get("runs_retention_days", self._runs_retention_days))
+        except (TypeError, ValueError):
+            retention = self._runs_retention_days
+        self._send_rate_limit_seconds = min(max(rate_limit, 0.0), 600.0)
+        self._runs_retention_days = min(max(retention, 0), 3650)
+
+    def _save_app_state(self) -> None:
+        try:
+            payload = {
+                "last_package_dir": str(self._package_dir) if self._package_dir else "",
+                "send_rate_limit_seconds": self._send_rate_limit_seconds,
+                "runs_retention_days": self._runs_retention_days,
+            }
+            self._app_state_path().write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass  # 启动状态持久化失败不影响主流程
+
+    def _restore_last_package(self) -> None:
+        """启动时恢复上次的任务包；任何失败都静默跳过，不阻塞启动。"""
+        try:
+            raw = json.loads(self._app_state_path().read_text(encoding="utf-8"))
+        except Exception:
+            return
+        raw_dir = str(raw.get("last_package_dir") or "").strip() if isinstance(raw, dict) else ""
+        if not raw_dir:
+            return
+        package_dir = Path(raw_dir)
+        if not package_dir.is_dir():
+            return
+        try:
+            self._ensure_within_home(package_dir)
+        except ValueError:
+            return
+        try:
+            self._load_package(package_dir, silent=True)
+        except Exception:
+            pass
+
+    def _cleanup_runs_if_configured(self) -> None:
+        if self._runs_retention_days <= 0:
+            return
+        try:
+            removed = cleanup_old_runs(runs_dir(self._home_dir), self._runs_retention_days)
+        except Exception:
+            return
+        if removed:
+            self.statusBar().showMessage(
+                f"已清理 {removed} 个超过 {self._runs_retention_days} 天的运行记录目录。",
+                10000,
+            )
+
+    def _apply_app_settings(self, *, rate_limit_seconds: float, retention_days: int) -> None:
+        self._send_rate_limit_seconds = min(max(float(rate_limit_seconds), 0.0), 600.0)
+        self._runs_retention_days = min(max(int(retention_days), 0), 3650)
+        self._save_app_state()
 
     def _open_path(self, path: Path) -> None:
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))

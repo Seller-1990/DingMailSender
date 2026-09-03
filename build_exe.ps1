@@ -95,6 +95,8 @@ $workDir = Join-Path $root "build\\pyinstaller"
   --distpath $distDir `
   --workpath $workDir `
   --paths (Join-Path $root "src") `
+  --icon (Join-Path $root "src\\dingmail\\gui\\resources\\app.ico") `
+  --add-data "$(Join-Path $root "src\\dingmail\\gui\\resources");dingmail/gui/resources" `
   .\\dingmail_gui.py
 
 if ($LASTEXITCODE -ne 0) {

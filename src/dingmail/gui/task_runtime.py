@@ -35,9 +35,6 @@ class TaskRuntimeController:
         self._validation_cache.clear()
 
     def reset_loaded_tasks(self, package_dir: Path, tasks: list[MailTask]) -> None:
-        same_package = self._package_dir is not None and package_dir.resolve() == self._package_dir.resolve()
-        previous_queued_ids = set(self.queued_task_ids) if same_package else set()
-
         self.set_package_dir(package_dir)
         self.invalidate_validation_cache()
         self.queued_task_ids.clear()
@@ -55,8 +52,17 @@ class TaskRuntimeController:
                 self._states[task.task_id].status = TaskStatus.DRAFT_SAVED if persisted == "draft_saved" else TaskStatus.DRAFT_FAILED
                 self._states[task.task_id].last_result = persisted
 
+        # 定时任务自动回归队列：队列只存在于内存，重启/重载后按任务表重新推导，
+        # 否则重启后定时任务会静默失效。已终态、已停用、已过期的不入队
+        #（过期任务不自动补发，避免启动即涌出陈旧邮件；由用户手动重排队）。
+        now = datetime.now()
         for task in tasks:
-            if task.task_id not in previous_queued_ids or not task.enabled or not task.schedule_enabled:
+            state = self._states[task.task_id]
+            if not task.enabled or not task.schedule_enabled or task.scheduled_at is None:
+                continue
+            if state.status in TaskStatus.terminal_statuses():
+                continue
+            if task.scheduled_at <= now:
                 continue
             if not self.validate_task(task, check_schedule_time=False):
                 self.queued_task_ids.add(task.task_id)

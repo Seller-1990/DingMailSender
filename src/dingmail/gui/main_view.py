@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import time
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..constants import DEFAULT_IMAP_HOST, DEFAULT_IMAP_PORT_SSL
 from ..model import SmtpConfig
 from ..task_models import MailTask
-from ..task_service import EMAIL_RE, render_task_preview_html
+from ..task_service import render_task_preview_html
 from ..task_status import TaskStatus
-from .main_support import TASK_FILTERS, error_summary
+from .main_support import AUTO_CONNECT_RETRY_SECONDS, TASK_FILTERS
+from .resources import app_icon
 from .theme import status_tone
 from .widgets import set_button_variant
 from .workers import TestSmtpWorker
@@ -25,7 +29,7 @@ class MainViewMixin:
     def _set_task_filter(self, filter_key: str) -> None:
         self._active_filter = filter_key if filter_key in TASK_FILTERS else "all"
         self._refresh_filter_buttons()
-        self._refresh_task_table()
+        self._task_proxy.set_filter_key(self._active_filter)
 
     def _refresh_filter_buttons(self) -> None:
         for key, button in self._filter_buttons.items():
@@ -41,55 +45,6 @@ class MainViewMixin:
             return None
         row = rows[0]
         return self._tasks[row] if 0 <= row < len(self._tasks) else None
-
-    def _task_matches_filter(self, task: MailTask) -> bool:
-        status = self._runtime.status_for(task)
-        if self._active_filter == "all":
-            return True
-        if self._active_filter == "ready":
-            return status == TaskStatus.READY
-        if self._active_filter == "issue":
-            return status == TaskStatus.VALIDATION_FAILED
-        if self._active_filter == "draft":
-            return status == TaskStatus.DRAFT_SAVED
-        if self._active_filter == "queued":
-            return status == TaskStatus.QUEUED
-        if self._active_filter == "failed":
-            return status in {TaskStatus.SEND_FAILED, TaskStatus.DRAFT_FAILED}
-        return True
-
-    def _task_matches_search(self, task: MailTask) -> bool:
-        query = self._task_search_input.text().strip().lower() if hasattr(self, "_task_search_input") else ""
-        if not query:
-            return True
-        haystack = " ".join(
-            [
-                "; ".join(task.to_recipients),
-                "; ".join(task.cc_recipients),
-                task.subject,
-                task.markdown_path,
-                task.note,
-                self._runtime.error_for(task),
-                self._runtime.last_result_for(task),
-            ]
-        ).lower()
-        return query in haystack
-
-    def _resize_task_columns(self) -> None:
-        if not hasattr(self, "_task_table"):
-            return
-        width = max(self._task_table.viewport().width(), 640)
-        fixed_widths = {0: 82, 4: 72, 5: 54, 6: 126}
-        fixed_total = sum(fixed_widths.values())
-        remaining = max(width - fixed_total - 20, 320)
-        flex_widths = {
-            1: int(remaining * 0.22),
-            2: int(remaining * 0.23),
-            3: int(remaining * 0.25),
-            7: int(remaining * 0.30),
-        }
-        for col, size in {**fixed_widths, **flex_widths}.items():
-            self._task_table.setColumnWidth(col, max(46, size))
 
     def _refresh_metrics(self) -> None:
         enabled_tasks = [task for task in self._tasks if task.enabled]
@@ -110,6 +65,11 @@ class MainViewMixin:
                 tile.update_value(value, detail)
 
     def _refresh_detail_panel(self) -> None:
+        rows = self._selected_rows()
+        if len(rows) > 1:
+            tasks = [self._tasks[row] for row in rows if 0 <= row < len(self._tasks)]
+            self._render_batch_detail(tasks)
+            return
         task = self._selected_detail_task()
         if task is None:
             self._detail_status_tag.set_status("未选择", "neutral")
@@ -146,12 +106,31 @@ class MainViewMixin:
         except Exception as exc:
             self._detail_preview_browser.setHtml(f"<p>预览失败：{exc}</p>")
 
+    def _render_batch_detail(self, tasks: list[MailTask]) -> None:
+        """多选时显示批量摘要，而不是“未选择任务”——批量正是保存草稿/发送的主操作流。"""
+        enabled = [task for task in tasks if task.enabled]
+        ready = sum(1 for task in enabled if self._runtime.status_for(task) == TaskStatus.READY)
+        issues = sum(1 for task in enabled if self._runtime.status_for(task) == TaskStatus.VALIDATION_FAILED)
+        self._detail_status_tag.set_status(f"已选择 {len(tasks)} 条", "info")
+        self._detail_title_label.setText("批量操作")
+        self._detail_to_label.setText(f"已启用：{len(enabled)} 条 / 共 {len(tasks)} 条")
+        self._detail_cc_label.setText(f"可保存草稿：{ready} 条")
+        self._detail_markdown_label.setText(f"需修正：{issues} 条")
+        self._detail_attachments_label.setText("")
+        self._detail_schedule_label.setText("")
+        self._detail_issue_label.setText(
+            "直接使用下方「保存草稿」或「立即发送」，系统会自动跳过需修正的任务。"
+        )
+        self._detail_preview_browser.setHtml("")
+
     def _build_tray(self) -> None:
         if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
             self._tray = None
             return
 
-        icon = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView)
+        icon = app_icon()
+        if icon.isNull():
+            icon = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView)
         self._tray = QtWidgets.QSystemTrayIcon(icon, self)
         self._tray.setToolTip("钉钉邮件发送")
         self._tray.activated.connect(self._on_tray_activated)
@@ -175,19 +154,23 @@ class MainViewMixin:
         self.activateWindow()
 
     def _exit_from_tray(self) -> None:
-        if self._delivery_worker_active():
+        active_workers = [
+            worker
+            for worker in (self._send_worker, self._draft_worker, self._smtp_worker)
+            if worker is not None
+        ]
+        if active_workers:
             self._cancel_current_delivery()
             # 等待 worker 线程结束，避免 QThread 析构时进程 abort
-            for worker in (self._send_worker, self._draft_worker):
-                if worker is not None:
-                    if not worker.wait(10000):  # 最多等 10 秒
-                        # 超时仍在运行，提示用户
-                        QtWidgets.QMessageBox.information(
-                            self,
-                            "等待任务结束",
-                            "正在等待后台任务安全停止，请稍候再重试退出。",
-                        )
-                        return
+            for worker in active_workers:
+                if not worker.wait(10000):  # 最多等 10 秒
+                    # 超时仍在运行，提示用户
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        "等待任务结束",
+                        "正在等待后台任务安全停止，请稍候再重试退出。",
+                    )
+                    return
         if self._runtime.queued_task_ids:
             reply = QtWidgets.QMessageBox.question(
                 self,
@@ -200,19 +183,23 @@ class MainViewMixin:
         QtWidgets.QApplication.quit()
 
     def _handle_close_event(self, event: QtGui.QCloseEvent) -> None:
-        if self._delivery_worker_active() and (self._quit_requested or self._tray is None):
+        active_workers = [
+            worker
+            for worker in (self._send_worker, self._draft_worker, self._smtp_worker)
+            if worker is not None
+        ]
+        if active_workers and (self._quit_requested or self._tray is None):
             # 尝试取消并等待
             self._cancel_current_delivery()
-            for worker in (self._send_worker, self._draft_worker):
-                if worker is not None:
-                    if not worker.wait(5000):
-                        QtWidgets.QMessageBox.information(
-                            self,
-                            "正在执行任务",
-                            "当前正在发送或保存草稿，请等待本轮任务完成后再退出。",
-                        )
-                        event.ignore()
-                        return
+            for worker in active_workers:
+                if not worker.wait(5000):
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        "正在执行任务",
+                        "当前正在发送、保存草稿或测试连接，请等待其完成后再退出。",
+                    )
+                    event.ignore()
+                    return
             event.accept()
             return
 
@@ -235,12 +222,7 @@ class MainViewMixin:
             )
             self._close_tip_shown = True
 
-    def _handle_resize_event(self, event: QtGui.QResizeEvent) -> None:
-        super().resizeEvent(event)
-        self._resize_task_columns()
-
     closeEvent = _handle_close_event
-    resizeEvent = _handle_resize_event
 
     def _set_smtp_status(self, connected: bool, text: str) -> None:
         self._smtp_connected = connected
@@ -250,58 +232,68 @@ class MainViewMixin:
             self._smtp_status_badge.set_status(text, "neutral")
         self._refresh_ui_state()
 
-    def _connect_smtp(self, from_email: str, password: str) -> None:
-        if not from_email:
-            QtWidgets.QMessageBox.warning(self, "缺少发件邮箱", "请输入发件邮箱后再连接。")
-            return
-        if not EMAIL_RE.match(from_email):
-            QtWidgets.QMessageBox.warning(self, "邮箱格式错误", "发件邮箱格式不正确，请检查后重试。")
-            return
-
-        if not password:
-            QtWidgets.QMessageBox.warning(self, "缺少授权码", "请输入 SMTP 授权码后再连接。")
-            return
-
-        self._prepare_smtp_connect(from_email)
-        worker = TestSmtpWorker(self._smtp_cfg, password)
-        self._smtp_worker = worker
-        worker.finished_ok.connect(lambda info: self._handle_smtp_connected(from_email, password, info))
-        worker.finished_err.connect(self._handle_smtp_connect_error)
-        worker.start()
-
-    def _prepare_smtp_connect(self, from_email: str) -> None:
+    def _apply_smtp_connection_success(
+        self,
+        *,
+        from_email: str,
+        password: str,
+        imap_host: str,
+        imap_port: int,
+        info: str,
+    ) -> str:
+        """应用一次成功的连接测试：更新状态、保存配置；返回展示用提示文本。"""
         self._smtp_cfg = SmtpConfig(
             host=self._smtp_cfg.host,
             port=self._smtp_cfg.port,
             security=self._smtp_cfg.security,
             username=from_email,
         )
-        self._refresh_smtp_summary_labels()
-
-        self._connect_btn.setEnabled(False)
-        self._set_smtp_status(False, "正在连接…")
-
-    def _handle_smtp_connected(self, from_email: str, password: str, info: str) -> None:
-        self._smtp_worker = None
         self._smtp_password = password
+        self._imap_host = imap_host.strip() or DEFAULT_IMAP_HOST
+        self._imap_port = int(imap_port) if imap_port else DEFAULT_IMAP_PORT_SSL
         self._connect_btn.setEnabled(True)
         self._set_smtp_status(True, info)
-        location_note = ""
-        save_warning = ""
         try:
             saved_path = self._save_connection_profile(from_email=from_email, smtp_password=password)
-            self._mark_connection_profile_saved(saved_path)
-            location_note = f"\n已保存登录信息：{saved_path}"
         except Exception as exc:
-            save_warning = (
-                f"\n\n连接信息未能写入 `{self._conn_config_path}`：{exc}\n"
+            return (
+                f"连接成功：{info}\n\n"
+                f"连接信息未能写入 `{self._conn_config_path}`：{exc}\n"
                 "本次连接可继续使用，但下次启动可能仍需重新填写。"
             )
-        QtWidgets.QMessageBox.information(self, "连接成功", f"SMTP 连接成功：{info}{location_note}{save_warning}")
+        self._mark_connection_profile_saved(saved_path)
+        return f"连接成功：{info}\n已保存登录信息：{saved_path}"
 
-    def _handle_smtp_connect_error(self, tb: str) -> None:
+    def _try_auto_connect(self) -> bool:
+        """静默自动重连：凭据已保存且空闲时使用，按节流间隔重试。
+
+        与手动连接的区别：不弹窗、失败不清空已存授权码，
+        供定时调度在 SMTP 掉线/重启后自动恢复发送能力。
+        """
+        if self._smtp_connected or self._smtp_worker is not None:
+            return False
+        if not self._smtp_cfg.username.strip() or not self._smtp_password:
+            return False
+        now = time.monotonic()
+        if now - self._last_auto_connect_at < AUTO_CONNECT_RETRY_SECONDS:
+            return False
+        self._last_auto_connect_at = now
+        self._connect_btn.setEnabled(False)
+        self._set_smtp_status(False, "正在自动连接…")
+        worker = TestSmtpWorker(self._smtp_cfg, self._smtp_password)
+        self._smtp_worker = worker
+        worker.finished_ok.connect(self._handle_auto_connect_ok)
+        worker.finished_err.connect(self._handle_auto_connect_err)
+        worker.start()
+        return True
+
+    def _handle_auto_connect_ok(self, info: str) -> None:
         self._smtp_worker = None
-        self._smtp_password = ""
         self._connect_btn.setEnabled(True)
-        self._set_smtp_status(False, "连接失败")
-        self._show_error_dialog("连接失败", f"SMTP 连接失败：{error_summary(tb)}", details=tb)
+        self._set_smtp_status(True, info)
+
+    def _handle_auto_connect_err(self, _tb: str) -> None:
+        self._smtp_worker = None
+        self._connect_btn.setEnabled(True)
+        # 状态徽标即反馈；下个调度周期会自动重试，不弹窗打扰
+        self._set_smtp_status(False, "自动连接失败")

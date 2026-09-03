@@ -7,7 +7,6 @@ from typing import Callable
 
 from PySide6 import QtCore, QtWidgets
 
-from ..constants import DEFAULT_IMAP_HOST, DEFAULT_IMAP_PORT_SSL
 from ..task_delivery import DeliveryStatus, SendTasksResult
 from ..task_models import MailTask
 from ..task_package import save_tasks_to_package
@@ -49,6 +48,7 @@ class MainDeliveryMixin:
 
         def _ok(result: object) -> None:
             _clear_worker()
+            self._hide_delivery_progress()
             if not isinstance(result, SendTasksResult):
                 error_text = f"后台任务返回了异常结果类型：{type(result).__name__}"
                 spec.mark_error(error_text)
@@ -62,6 +62,7 @@ class MainDeliveryMixin:
 
         def _err(tb: str) -> None:
             _clear_worker()
+            self._hide_delivery_progress()
             error_text = tb.strip()
             spec.mark_error(error_text)
             self._refresh_task_table()
@@ -75,11 +76,22 @@ class MainDeliveryMixin:
         spec.worker.finished_err.connect(_err)
         if hasattr(spec.worker, "progress"):
             spec.worker.progress.connect(_progress)
+        # 首个任务完成前进度未知，先显示忙碌指示
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setFormat("准备中…")
+        self._progress_bar.setVisible(True)
         spec.worker.start()
 
     def _on_delivery_progress(self, current: int, total: int) -> None:
+        self._progress_bar.setRange(0, max(total, 1))
+        self._progress_bar.setValue(current)
+        self._progress_bar.setFormat(f"{current} / {total}")
         if hasattr(self, "statusBar"):
             self.statusBar().showMessage(f"正在处理 {current}/{total}...", 5000)
+
+    def _hide_delivery_progress(self) -> None:
+        self._progress_bar.setVisible(False)
+        self._progress_bar.reset()
 
     def _cancel_current_delivery(self) -> None:
         if self._send_worker is not None and hasattr(self._send_worker, "request_cancel"):
@@ -108,16 +120,8 @@ class MainDeliveryMixin:
             home_dir=self._home_dir,
             smtp_cfg=self._smtp_cfg,
             smtp_password=self._smtp_password,
+            rate_limit_seconds=self._send_rate_limit_seconds,
         ))
-        def _show_queue_notification(result: SendTasksResult) -> None:
-            if self._tray is not None and queue_mode:
-                self._tray.showMessage(
-                    "定时邮件已发送",
-                    f"已完成 {len(result.outcomes)} 条任务。",
-                    QtWidgets.QSystemTrayIcon.Information,
-                    4000,
-                )
-
         self._start_delivery_worker(
             spec=DeliveryWorkerSpec(
                 worker=worker,
@@ -134,7 +138,6 @@ class MainDeliveryMixin:
                 ),
                 error_title="发送失败",
                 error_prefix="发送任务失败",
-                after_ok=_show_queue_notification,
             )
         )
 
@@ -161,6 +164,7 @@ class MainDeliveryMixin:
             imap_password=self._smtp_password,
             imap_host=self._imap_host,
             imap_port=self._imap_port,
+            rate_limit_seconds=self._send_rate_limit_seconds,
         ))
         self._start_delivery_worker(
             spec=DeliveryWorkerSpec(
@@ -223,14 +227,21 @@ class MainDeliveryMixin:
         self._persist_delivery_status(tasks, result, package_dir)
         self._refresh_task_table()
         self._refresh_ui_state()
-        details = self._format_failure_details(result)
-        QtWidgets.QMessageBox.information(
-            self,
-            "发送完成",
+        summary = (
             f"本次输出目录：{result.run_paths.run_dir}\n发送成功：{sent_count}\n发送失败：{failed_count}"
             f"{self._skipped_note(self._result_skipped_count(result))}"
-            f"{details}",
+            f"{self._format_failure_details(result)}"
         )
+        if failed_count <= 0 and self._tray is not None:
+            # 全部成功不打断操作；详情可从“运行历史”查看
+            self._tray.showMessage(
+                "发送完成",
+                f"成功发送 {sent_count} 条任务。\n输出目录：{result.run_paths.run_dir}",
+                QtWidgets.QSystemTrayIcon.Information,
+                4000,
+            )
+            return
+        QtWidgets.QMessageBox.information(self, "发送完成", summary)
 
     def _apply_draft_result(self, tasks: list[MailTask], package_dir: Path, result: SendTasksResult) -> None:
         self._last_run_dir = result.run_paths.run_dir
@@ -242,17 +253,26 @@ class MainDeliveryMixin:
         self._persist_delivery_status(tasks, result, package_dir)
         self._refresh_task_table()
         self._refresh_ui_state()
-        details = self._format_failure_details(result)
-        QtWidgets.QMessageBox.information(
-            self,
-            "保存草稿完成",
+        summary = (
             f"本次输出目录：{result.run_paths.run_dir}\n草稿保存成功：{ok_count}\n草稿保存失败：{fail_count}"
             f"{self._skipped_note(self._result_skipped_count(result))}"
-            f"{details}",
+            f"{self._format_failure_details(result)}"
         )
+        if fail_count <= 0 and self._tray is not None:
+            self._tray.showMessage(
+                "保存草稿完成",
+                f"成功保存 {ok_count} 条草稿。\n输出目录：{result.run_paths.run_dir}",
+                QtWidgets.QSystemTrayIcon.Information,
+                4000,
+            )
+            return
+        QtWidgets.QMessageBox.information(self, "保存草稿完成", summary)
 
     def _persist_delivery_status(self, tasks: list[MailTask], result: SendTasksResult, package_dir: Path) -> None:
         """将发送/草稿结果回写到 tasks.xlsx 的 '最近结果' 列。"""
+        if not self._delivery_result_matches_current_tasks(tasks, package_dir):
+            # 中途已切换任务包：结果属于旧包任务，绝不能把当前任务列表写进旧包目录
+            return
         outcome_map = {outcome.task_id: outcome for outcome in result.outcomes}
         changed = False
         for task in self._tasks:
@@ -265,8 +285,9 @@ class MainDeliveryMixin:
         if changed and package_dir and package_dir.is_dir():
             try:
                 save_tasks_to_package(package_dir, self._tasks)
-            except Exception:
-                pass  # 回写失败不阻断用户流程，下次发送仍可正常进行
+            except Exception as exc:
+                # 回写失败不阻断用户流程，但必须可见——它是“防崩溃后重复发送”的保障
+                self.statusBar().showMessage(f"发送状态回写 tasks.xlsx 失败：{error_summary(str(exc))}", 10000)
 
     @staticmethod
     def _format_failure_details(result: SendTasksResult) -> str:
@@ -367,11 +388,15 @@ class MainDeliveryMixin:
 
     def _process_scheduled_tasks(self) -> None:
         if (
-            not self._smtp_connected
-            or self._send_worker is not None
+            self._send_worker is not None
             or self._draft_worker is not None
             or not self._package_dir
         ):
+            return
+        if not self._smtp_connected:
+            # 定时队列非空时静默自动重连（节流），避免重启/掉线后定时任务静默失效
+            if self._runtime.queued_task_ids:
+                self._try_auto_connect()
             return
         due_tasks = self._runtime.collect_due_tasks(self._tasks, now=datetime.now())
 

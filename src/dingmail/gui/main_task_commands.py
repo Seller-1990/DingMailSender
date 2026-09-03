@@ -32,6 +32,7 @@ class MainTaskCommandMixin:
             return False
 
         self._tasks = updated_tasks
+        self._task_model.set_data_source(self._tasks, self._runtime)
         reset_ids = set(reset_runtime_task_ids)
         for task in self._tasks:
             if task.task_id in reset_ids:
@@ -40,11 +41,19 @@ class MainTaskCommandMixin:
         self._runtime.sync_task_ids(self._tasks)
         self._refresh_task_table()
         self._refresh_ui_state()
+        self._start_incremental_validation()
         return True
 
     def _selected_rows(self) -> list[int]:
-        rows = self._task_table.selectionModel().selectedRows() if self._task_table.selectionModel() else []
-        return sorted({row.row() for row in rows})
+        selection_model = self._task_table.selectionModel()
+        rows = selection_model.selectedRows() if selection_model else []
+        return sorted(
+            {
+                self._task_proxy.mapToSource(index).row()
+                for index in rows
+                if index.isValid()
+            }
+        )
 
     def _selected_tasks(self) -> list[MailTask]:
         return [self._tasks[i] for i in self._selected_rows() if 0 <= i < len(self._tasks)]

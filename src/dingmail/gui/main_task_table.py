@@ -1,93 +1,28 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-from PySide6 import QtCore, QtGui, QtWidgets
-
-from ..task_models import MailTask
 from ..task_status import TaskStatus
-from .main_support import STATUS_ROW_COLORS, UiActionState
-from .theme import status_tone
+from .main_support import UiActionState
 
 
 class MainTaskTableMixin:
-    def _task_table_values(self, task: MailTask) -> list[str]:
-        attachment_count = task.attachment_count()
-        state = self._runtime.state_for(task)
-        issue_text = state.error_message or state.last_result or task.note
-        schedule_text = task.scheduled_at.strftime("%Y-%m-%d %H:%M:%S") if task.scheduled_at else ""
-        markdown_display = Path(task.markdown_path).name if task.markdown_path else "未填写"
-        return [
-            state.status.label,
-            "; ".join(task.to_recipients),
-            task.subject,
-            markdown_display,
-            f"{attachment_count} 个附件" if attachment_count else "无",
-            "是" if task.schedule_enabled else "否",
-            schedule_text,
-            issue_text,
-        ]
+    def _refresh_task_table(
+        self,
+        *,
+        max_validate: int = 0,
+        update_detail: bool = True,
+    ) -> bool:
+        """刷新任务表；返回 True 表示所有任务校验缓存均已就绪。
 
-    def _task_tooltip(self, task: MailTask) -> str:
-        state = self._runtime.state_for(task)
-        return "\n".join(
-            x
-            for x in [
-                f"任务ID：{task.task_id}",
-                f"启用：{'是' if task.enabled else '否'}",
-                f"抄送人：{'; '.join(task.cc_recipients)}" if task.cc_recipients else "",
-                f"开头/补充内容：{task.intro_text}" if task.intro_text else "",
-                f"Markdown：{task.markdown_path}" if task.markdown_path else "",
-                f"附件：{'; '.join(task.attachment_paths)}" if task.attachment_paths else "",
-                f"备注：{task.note}" if task.note else "",
-                f"最近结果：{state.last_result}" if state.last_result else "",
-                f"说明：{state.error_message}" if state.error_message else "",
-            ]
-            if x
-        )
-
-    def _set_task_table_item(self, row: int, col: int, value: str, tooltip: str, row_color: QtGui.QColor) -> None:
-        item = self._task_table.item(row, col)
-        if item is None:
-            item = QtWidgets.QTableWidgetItem()
-            self._task_table.setItem(row, col, item)
-        item.setText(value)
-        item.setToolTip(tooltip)
-        alignment = QtCore.Qt.AlignCenter if col in (0, 4, 5) else QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
-        item.setTextAlignment(alignment)
-        if col == 0:
-            item.setBackground(row_color)
-            item.setForeground(QtGui.QColor("#172033"))
-            font = item.font()
-            font.setBold(True)
-            item.setFont(font)
-        else:
-            item.setBackground(QtGui.QBrush())
-
-    def _refresh_task_table_row(self, row: int, task: MailTask) -> None:
-        tone = status_tone(self._runtime.status_for(task))
-        row_color = QtGui.QColor(STATUS_ROW_COLORS.get(tone, STATUS_ROW_COLORS["neutral"]))
-        tooltip = self._task_tooltip(task)
-        for col, value in enumerate(self._task_table_values(task)):
-            self._set_task_table_item(row, col, value, tooltip, row_color)
-        self._task_table.setRowHidden(
-            row,
-            not (self._task_matches_filter(task) and self._task_matches_search(task)),
-        )
-
-    def _refresh_task_table(self) -> None:
-        self._runtime.refresh_runtime_state(self._tasks)
-        self._task_table.setUpdatesEnabled(False)
-        self._task_table.setRowCount(len(self._tasks))
-        try:
-            for row, task in enumerate(self._tasks):
-                self._refresh_task_table_row(row, task)
-        finally:
-            self._task_table.setUpdatesEnabled(True)
-        self._resize_task_columns()
-        self._task_table.resizeRowsToContents()
-        self._refresh_detail_panel()
+        max_validate>0 时本轮最多校验 N 个未缓存任务（增量模式）；
+        update_detail=False 供增量校验 tick 跳过详情面板的重渲染。
+        行展示由 TaskTableModel.data() 按需提供，refresh() 只发 dataChanged。
+        """
+        all_validated = self._runtime.refresh_runtime_state(self._tasks, max_validate=max_validate)
+        self._task_model.refresh()
+        if update_detail:
+            self._refresh_detail_panel()
         self._refresh_metrics()
+        return all_validated
 
     def _refresh_package_action_buttons(self, has_package: bool) -> None:
         is_busy = self._send_worker is not None or self._draft_worker is not None

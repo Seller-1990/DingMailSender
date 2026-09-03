@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import json
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -15,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from PySide6 import QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from dingmail.connection_profile import ConnectionProfile, ConnectionProfileLoadResult
 from dingmail.gui.dialogs import RunHistoryDialog
@@ -148,7 +149,7 @@ class MainWindowGuiTests(unittest.TestCase):
 
         self.assertTrue(warning_mock.called)
         self.assertEqual("任务ID已自动修复", warning_mock.call_args.args[1])
-        self.assertEqual(2, window._task_table.rowCount())
+        self.assertEqual(2, window._task_model.rowCount())
         self.assertEqual(2, len({task.task_id for task in window._tasks}))
 
         saved_tasks = load_tasks_from_package(package_dir)
@@ -262,8 +263,8 @@ class MainWindowGuiTests(unittest.TestCase):
         window._load_package(package_dir)
         self._process_events()
 
-        self.assertEqual(8, window._task_table.columnCount())
-        self.assertEqual("状态", window._task_table.horizontalHeaderItem(0).text())
+        self.assertEqual(8, window._task_model.columnCount())
+        self.assertEqual("状态", window._task_model.headerData(0, QtCore.Qt.Horizontal))
         self.assertEqual("保存草稿", window._save_drafts_btn.text())
         self.assertEqual("运行历史", window._open_last_run_btn.text())
         self.assertEqual("primary", window._save_drafts_btn.property("variant"))
@@ -275,8 +276,9 @@ class MainWindowGuiTests(unittest.TestCase):
 
         window._set_task_filter("issue")
         self._process_events()
-        self.assertTrue(window._task_table.isRowHidden(0))
-        self.assertFalse(window._task_table.isRowHidden(1))
+        self.assertEqual(1, window._task_proxy.rowCount())
+        source_row = window._task_proxy.mapToSource(window._task_proxy.index(0, 0)).row()
+        self.assertEqual("task-2", window._task_model.task_at(source_row).task_id)
 
     def test_run_history_dialog_summarizes_manifest(self) -> None:
         runs_root = self.home_dir / "runs"
@@ -531,16 +533,21 @@ class MainWindowGuiTests(unittest.TestCase):
         window._connection_profile_warning = "需要迁移"
         window._refresh_smtp_summary_labels()
 
-        with (
-            patch.object(window, "_save_connection_profile", return_value=saved_path),
-            patch.object(QtWidgets.QMessageBox, "information"),
-        ):
-            window._handle_smtp_connected("new@example.com", "secret", "ok")
+        with patch.object(window, "_save_connection_profile", return_value=saved_path):
+            window._apply_smtp_connection_success(
+                from_email="new@example.com",
+                password="secret",
+                imap_host="imap.example.com",
+                imap_port=993,
+                info="ok",
+            )
 
         self.assertEqual("", window._connection_profile_warning)
         self.assertEqual("配置：用户配置", window._connection_profile_source_text)
         self.assertEqual("配置：用户配置", window._profile_source_label.text())
         self.assertIn(str(saved_path), window._profile_source_label.toolTip())
+        self.assertTrue(window._smtp_connected)
+        self.assertEqual("imap.example.com", window._imap_host)
 
     def test_legacy_plaintext_profile_is_migrated_when_gui_loads(self) -> None:
         legacy_path = self.home_dir / "legacy" / "conn_profile.json"
@@ -586,6 +593,267 @@ class MainWindowGuiTests(unittest.TestCase):
         window._state.tasks.append(MailTask(task_id="state-task", to_recipients=["a@example.com"], subject="状态拆分"))
         self.assertEqual("state-task", window._tasks[0].task_id)
 
+    def test_future_scheduled_tasks_are_requeued_on_load(self) -> None:
+        package_dir = self._create_package_dir("requeue")
+        save_tasks_to_package(
+            package_dir,
+            [
+                MailTask(
+                    task_id="task-1",
+                    to_recipients=["a@example.com"],
+                    subject="定时任务",
+                    markdown_path="content/body.md",
+                    schedule_enabled=True,
+                    scheduled_at=datetime.now() + timedelta(hours=1),
+                )
+            ],
+        )
+
+        window = self._create_window()
+        window._load_package(package_dir)
+
+        self.assertIn("task-1", window._runtime.queued_task_ids)
+        self.assertEqual(TaskStatus.QUEUED, window._runtime.status_for(window._tasks[0]))
+
+    def test_terminal_or_expired_scheduled_tasks_not_requeued_on_load(self) -> None:
+        package_dir = self._create_package_dir("norequeue")
+        save_tasks_to_package(
+            package_dir,
+            [
+                MailTask(
+                    task_id="task-sent",
+                    to_recipients=["a@example.com"],
+                    subject="已发送",
+                    markdown_path="content/body.md",
+                    schedule_enabled=True,
+                    scheduled_at=datetime.now() + timedelta(hours=1),
+                    last_delivery_status="sent",
+                ),
+                MailTask(
+                    task_id="task-expired",
+                    to_recipients=["b@example.com"],
+                    subject="已过期",
+                    markdown_path="content/body.md",
+                    schedule_enabled=True,
+                    scheduled_at=datetime.now() - timedelta(hours=1),
+                ),
+            ],
+        )
+
+        window = self._create_window()
+        window._load_package(package_dir)
+
+        self.assertEqual(set(), window._runtime.queued_task_ids)
+        self.assertEqual(TaskStatus.SENT, window._runtime.status_for(window._tasks[0]))
+
+    def test_exit_from_tray_waits_smtp_worker(self) -> None:
+        window = self._create_window()
+        window._tray = _FakeTray()
+        window._smtp_worker = _FakeWorker()
+
+        with patch.object(QtWidgets.QApplication, "quit") as quit_mock:
+            window._exit_from_tray()
+
+        self.assertTrue(window._quit_requested)
+        self.assertTrue(quit_mock.called)
+
+    def test_close_event_accepts_after_smtp_worker_wait(self) -> None:
+        window = self._create_window()
+        window._tray = None
+        window._smtp_worker = _FakeWorker()
+
+        event = QtGui.QCloseEvent()
+        window.closeEvent(event)
+
+        self.assertTrue(event.isAccepted())
+
+    def test_last_package_restored_on_startup(self) -> None:
+        package_dir = self._create_package_dir("restore")
+        save_tasks_to_package(
+            package_dir,
+            [
+                MailTask(
+                    task_id="task-1",
+                    to_recipients=["a@example.com"],
+                    subject="主题",
+                    markdown_path="content/body.md",
+                )
+            ],
+        )
+        (self.home_dir / "state.json").write_text(
+            json.dumps({"last_package_dir": str(package_dir)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        window = self._create_window()
+
+        self.assertEqual(package_dir, window._package_dir)
+        self.assertEqual(1, len(window._tasks))
+
+    def test_persist_delivery_status_skips_write_after_package_switch(self) -> None:
+        old_package = self._create_package_dir("old-persist")
+        new_package = self._create_package_dir("new-persist")
+        save_tasks_to_package(
+            old_package,
+            [
+                MailTask(
+                    task_id="same-id",
+                    to_recipients=["old@example.com"],
+                    subject="旧任务",
+                    markdown_path="content/body.md",
+                )
+            ],
+        )
+        save_tasks_to_package(
+            new_package,
+            [
+                MailTask(
+                    task_id="same-id",
+                    to_recipients=["new@example.com"],
+                    subject="新任务",
+                    markdown_path="content/body.md",
+                )
+            ],
+        )
+
+        window = self._create_window()
+        window._load_package(old_package)
+        submitted_tasks = list(window._tasks)
+        window._runtime.mark_sending(submitted_tasks)
+        window._load_package(new_package)
+        result = SendTasksResult(
+            run_paths=self._create_run_paths(),
+            outcomes=[
+                TaskDeliveryOutcome(
+                    task_id="same-id",
+                    to_email="old@example.com",
+                    cc_email="",
+                    subject="旧任务",
+                    status="sent",
+                    message_id="<m1>",
+                    error=None,
+                )
+            ],
+        )
+
+        with patch.object(QtWidgets.QMessageBox, "information"):
+            window._apply_send_result(submitted_tasks, old_package, result)
+
+        persisted_old = load_tasks_from_package(old_package)
+        self.assertEqual("旧任务", persisted_old[0].subject)
+        self.assertEqual("", persisted_old[0].last_delivery_status)
+    def test_search_filter_filters_through_proxy(self) -> None:
+        package_dir = self._create_package_dir("search")
+        save_tasks_to_package(
+            package_dir,
+            [
+                MailTask(
+                    task_id="task-1",
+                    to_recipients=["a@example.com"],
+                    subject="月度通知",
+                    markdown_path="content/body.md",
+                ),
+                MailTask(
+                    task_id="task-2",
+                    to_recipients=["b@example.com"],
+                    subject="项目周报",
+                    markdown_path="content/body.md",
+                ),
+            ],
+        )
+
+        window = self._create_window()
+        window._load_package(package_dir)
+        self.assertEqual(2, window._task_proxy.rowCount())
+
+        window._task_search_input.setText("周报")
+        window._apply_search_text()
+        self.assertEqual(1, window._task_proxy.rowCount())
+        source_row = window._task_proxy.mapToSource(window._task_proxy.index(0, 0)).row()
+        self.assertEqual("task-2", window._task_model.task_at(source_row).task_id)
+
+        window._task_search_input.setText("")
+        window._apply_search_text()
+        self.assertEqual(2, window._task_proxy.rowCount())
+
+    def test_selected_rows_map_through_proxy_when_filtered(self) -> None:
+        package_dir = self._create_package_dir("selmap")
+        save_tasks_to_package(
+            package_dir,
+            [
+                MailTask(
+                    task_id="task-1",
+                    to_recipients=["a@example.com"],
+                    subject="正常任务",
+                    markdown_path="content/body.md",
+                ),
+                MailTask(
+                    task_id="task-2",
+                    to_recipients=["b@example.com"],
+                    subject="异常任务",
+                    markdown_path="content/missing.md",
+                ),
+            ],
+        )
+
+        window = self._create_window()
+        window._load_package(package_dir)
+        window._set_task_filter("issue")
+        self._process_events()
+
+        window._task_table.selectRow(0)
+        self._process_events()
+
+        self.assertEqual([1], window._selected_rows())
+        self.assertEqual("task-2", window._selected_detail_task().task_id)
+        self.assertEqual("异常任务", window._detail_title_label.text())
+    def test_batch_selection_shows_summary_detail(self) -> None:
+        package_dir = self._create_package_dir("batch")
+        save_tasks_to_package(
+            package_dir,
+            [
+                MailTask(
+                    task_id="task-1",
+                    to_recipients=["a@example.com"],
+                    subject="正常任务",
+                    markdown_path="content/body.md",
+                ),
+                MailTask(
+                    task_id="task-2",
+                    to_recipients=["b@example.com"],
+                    subject="异常任务",
+                    markdown_path="content/missing.md",
+                ),
+            ],
+        )
+
+        window = self._create_window()
+        window._load_package(package_dir)
+        self._process_events()
+
+        window._task_table.selectAll()
+        self._process_events()
+
+        self.assertEqual("批量操作", window._detail_title_label.text())
+        self.assertIn("已选择 2 条", window._detail_status_tag.text())
+        self.assertIn("可保存草稿：1 条", window._detail_cc_label.text())
+        self.assertIn("需修正：1 条", window._detail_markdown_label.text())
+
+    def test_app_settings_persist_to_state_file(self) -> None:
+        window = self._create_window()
+
+        window._apply_app_settings(rate_limit_seconds=2.5, retention_days=30)
+
+        self.assertEqual(2.5, window._send_rate_limit_seconds)
+        self.assertEqual(30, window._runs_retention_days)
+        saved = json.loads((self.home_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(2.5, saved["send_rate_limit_seconds"])
+        self.assertEqual(30, saved["runs_retention_days"])
+
+        # 越界值应被夹紧
+        window._apply_app_settings(rate_limit_seconds=9999, retention_days=-5)
+        self.assertEqual(600.0, window._send_rate_limit_seconds)
+        self.assertEqual(0, window._runs_retention_days)
 
 
 if __name__ == "__main__":

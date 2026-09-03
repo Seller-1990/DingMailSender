@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -96,6 +97,38 @@ class PathsAndRunsTests(unittest.TestCase):
                 create=True,
             ):
                 self.assertEqual(exe_dir.resolve(), program_dir())
+
+    def test_cleanup_old_runs_removes_only_expired_directories(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dingmail_cleanup_") as tmp:
+            runs_root = Path(tmp)
+            old_run = runs_root / "20250101_000000_old"
+            new_run = runs_root / "20990101_000000_new"
+            a_file = runs_root / "loose.txt"
+            for path in (old_run, new_run):
+                path.mkdir()
+                (path / "manifest.csv").write_text("idx\n", encoding="utf-8")
+            a_file.write_text("keep", encoding="utf-8")
+            two_years_ago = 0
+            os.utime(old_run, (two_years_ago, two_years_ago))
+
+            removed = run_store.cleanup_old_runs(runs_root, retention_days=30)
+
+            self.assertEqual(1, removed)
+            self.assertFalse(old_run.exists())
+            self.assertTrue(new_run.exists())
+            self.assertTrue(a_file.exists())
+
+    def test_cleanup_old_runs_is_noop_when_retention_disabled(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dingmail_cleanup_off_") as tmp:
+            runs_root = Path(tmp)
+            run_dir = runs_root / "20250101_000000_old"
+            run_dir.mkdir()
+            os.utime(run_dir, (0, 0))
+
+            removed = run_store.cleanup_old_runs(runs_root, retention_days=0)
+
+            self.assertEqual(0, removed)
+            self.assertTrue(run_dir.exists())
 
 
 if __name__ == "__main__":

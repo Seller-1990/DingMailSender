@@ -21,6 +21,7 @@ from .main_support import SCHEDULE_CHECK_INTERVAL_MS
 from .main_tasks import MainTaskMixin
 from .main_ui import MainUiMixin
 from .main_view import MainViewMixin
+from .resources import app_icon
 from .workers import SaveDraftsWorker, SendTasksWorker, TestSmtpWorker
 
 
@@ -29,6 +30,8 @@ class MainWindow(MainUiMixin, MainViewMixin, MainTaskMixin, MainDeliveryMixin, Q
         super().__init__()
         self.setWindowTitle(f"钉钉邮件发送 v{__version__}")
         self.resize(1420, 880)
+        # 小屏（1366x768）以下继续缩会挤压双栏工作台到不可用，给出硬下限
+        self.setMinimumSize(1180, 720)
 
         home_dir = ensure_layout(detect_home_dir())
         conn_config_path = connection_profile_path()
@@ -42,6 +45,7 @@ class MainWindow(MainUiMixin, MainViewMixin, MainTaskMixin, MainDeliveryMixin, Q
         self._smtp_worker: TestSmtpWorker | None = None
         self._send_worker: SendTasksWorker | None = None
         self._draft_worker: SaveDraftsWorker | None = None
+        self._last_auto_connect_at = 0.0
 
         self._load_connection_profile()
         self._build_ui()
@@ -63,6 +67,9 @@ class MainWindow(MainUiMixin, MainViewMixin, MainTaskMixin, MainDeliveryMixin, Q
             QtCore.QTimer.singleShot(0, self._show_connection_profile_error)
         elif self._connection_profile_warning:
             QtCore.QTimer.singleShot(0, self._show_connection_profile_migration_notice)
+        self._load_app_state()
+        self._restore_last_package()
+        self._cleanup_runs_if_configured()
 
     def _load_connection_profile(self) -> None:
         try:
@@ -125,6 +132,8 @@ class MainWindow(MainUiMixin, MainViewMixin, MainTaskMixin, MainDeliveryMixin, Q
             self._conn_config_path,
             from_email=from_email,
             smtp_password=smtp_password,
+            imap_host=self._imap_host,
+            imap_port=self._imap_port,
         )
 
     def _mark_connection_profile_saved(self, saved_path: Path) -> None:
@@ -172,11 +181,11 @@ class MainWindow(MainUiMixin, MainViewMixin, MainTaskMixin, MainDeliveryMixin, Q
         if not self._tasks:
             self._validate_timer.stop()
             return
-        all_done = self._runtime.refresh_runtime_state(self._tasks, max_validate=5)
-        self._refresh_task_table()
-        self._refresh_metrics()
+        all_done = self._refresh_task_table(max_validate=5, update_detail=False)
         if all_done:
             self._validate_timer.stop()
+            # 校验完成后做一次全量刷新，恢复完整布局与详情面板
+            self._refresh_task_table()
 
     def _start_incremental_validation(self) -> None:
         """启动增量校验 timer。"""
@@ -201,6 +210,7 @@ def _acquire_single_instance_lock() -> socket.socket | None:
 
 def run() -> int:
     app = QtWidgets.QApplication([])
+    app.setWindowIcon(app_icon())  # 托盘不可用时也保证窗口/对话框有应用图标
     lock = _acquire_single_instance_lock()
     if lock is None:
         QtWidgets.QMessageBox.warning(
@@ -253,6 +263,8 @@ for _attr_name, _state_name in {
     "_quit_requested": "quit_requested",
     "_close_tip_shown": "close_tip_shown",
     "_active_filter": "active_filter",
+    "_send_rate_limit_seconds": "send_rate_limit_seconds",
+    "_runs_retention_days": "runs_retention_days",
     "_connection_profile_error": "connection_profile_error",
     "_connection_profile_source_text": "connection_profile_source_text",
     "_connection_profile_source_detail": "connection_profile_source_detail",

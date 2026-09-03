@@ -15,7 +15,8 @@ STATUS_TONES = {
     TaskStatus.SEND_FAILED: "danger",
     TaskStatus.DRAFT_SAVED: "draft",
     TaskStatus.DRAFT_FAILED: "danger",
-    TaskStatus.READY: "success",
+    # READY 用 info 蓝与 SENT 的 success 绿区分：待办与已完成语义不同
+    TaskStatus.READY: "info",
 }
 
 
@@ -165,13 +166,13 @@ WORKBENCH_QSS = """
             border-color: transparent;
             color: #526173;
         }
-        QLineEdit, QTextBrowser, QPlainTextEdit, QListWidget, QTableWidget, QDateTimeEdit, QComboBox {
+        QLineEdit, QTextBrowser, QPlainTextEdit, QListWidget, QTableView, QDateTimeEdit, QComboBox {
             background: #ffffff;
             border: 1px solid #c8d2df;
             border-radius: 8px;
             padding: 6px 8px;
         }
-        QTableWidget {
+        QTableView {
             gridline-color: #e4e9f0;
             alternate-background-color: #f8fafc;
             selection-background-color: #eaf0ff;

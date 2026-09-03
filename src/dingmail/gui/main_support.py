@@ -6,6 +6,7 @@ from datetime import datetime
 from PySide6 import QtCore, QtWidgets
 
 SCHEDULE_CHECK_INTERVAL_MS = 15_000
+AUTO_CONNECT_RETRY_SECONDS = 60.0
 STATUS_ROW_COLORS = {
     "neutral": "#f3f6fa",
     "success": "#eef8f1",

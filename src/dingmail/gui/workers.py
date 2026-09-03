@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6 import QtCore
 
-from ..constants import DEFAULT_IMAP_HOST, DEFAULT_IMAP_PORT_SSL
+from ..constants import DEFAULT_IMAP_HOST, DEFAULT_IMAP_PORT_SSL, DEFAULT_RATE_LIMIT_SECONDS
 from ..model import SmtpConfig
 from ..smtp_sender import SmtpSession
 from ..task_delivery import (
@@ -26,6 +26,7 @@ class SendWorkerConfig:
     home_dir: Path
     smtp_cfg: SmtpConfig
     smtp_password: str
+    rate_limit_seconds: float = DEFAULT_RATE_LIMIT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class DraftWorkerConfig:
     imap_password: str
     imap_host: str = DEFAULT_IMAP_HOST
     imap_port: int = DEFAULT_IMAP_PORT_SSL
+    rate_limit_seconds: float = DEFAULT_RATE_LIMIT_SECONDS
 
 
 class TestSmtpWorker(QtCore.QThread):
@@ -69,6 +71,7 @@ class SendTasksWorker(QtCore.QThread):
         self._home_dir = config.home_dir
         self._smtp_cfg = config.smtp_cfg
         self._smtp_password = config.smtp_password
+        self._rate_limit_seconds = config.rate_limit_seconds
         self._cancel_requested = False
 
     def request_cancel(self) -> None:
@@ -90,6 +93,7 @@ class SendTasksWorker(QtCore.QThread):
                     smtp_security=self._smtp_cfg.security,
                     smtp_username=self._smtp_cfg.username,
                     smtp_password=self._smtp_password,
+                    rate_limit_seconds=self._rate_limit_seconds,
                 ),
                 progress_callback=self._on_progress,
                 cancel_check=lambda: self._cancel_requested,
@@ -116,6 +120,7 @@ class SaveDraftsWorker(QtCore.QThread):
         self._imap_password = config.imap_password
         self._imap_host = config.imap_host
         self._imap_port = config.imap_port
+        self._rate_limit_seconds = config.rate_limit_seconds
         self._cancel_requested = False
 
     def request_cancel(self) -> None:
@@ -136,6 +141,7 @@ class SaveDraftsWorker(QtCore.QThread):
                     imap_password=self._imap_password,
                     imap_host=self._imap_host,
                     imap_port=self._imap_port,
+                    rate_limit_seconds=self._rate_limit_seconds,
                 ),
                 progress_callback=self._on_progress,
                 cancel_check=lambda: self._cancel_requested,

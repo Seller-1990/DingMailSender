@@ -39,3 +39,11 @@ dingmail-workbench-*.png
 # Secrets
 conn_profile.json
 .zcode/
+
+# App runtime state (home_dir root when running from source)
+state.json
+
+# Planning artifacts (agent working memory)
+task_plan.md
+findings.md
+progress.md

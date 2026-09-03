@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6 import QtWidgets
 
-from ..constants import DEFAULT_IMAP_HOST, DEFAULT_IMAP_PORT_SSL
+from ..constants import DEFAULT_IMAP_HOST, DEFAULT_IMAP_PORT_SSL, DEFAULT_RATE_LIMIT_SECONDS
 from ..model import SmtpConfig
 from ..task_models import MailTask
 from .task_runtime import TaskRuntimeController
@@ -29,6 +29,8 @@ class MainWindowState:
     quit_requested: bool = False
     close_tip_shown: bool = False
     active_filter: str = "all"
+    send_rate_limit_seconds: float = DEFAULT_RATE_LIMIT_SECONDS
+    runs_retention_days: int = 0
     connection_profile_error: str = ""
     connection_profile_source_text: str = "配置：默认参数（未保存）"
     connection_profile_source_detail: str = ""
