@@ -66,6 +66,8 @@ class TaskRuntimeController:
                 continue
             if not self.validate_task(task, check_schedule_time=False):
                 self.queued_task_ids.add(task.task_id)
+                state.status = TaskStatus.QUEUED
+                state.error_message = ""
 
     def sync_task_ids(self, tasks: list[MailTask]) -> None:
         valid_ids = {task.task_id for task in tasks}

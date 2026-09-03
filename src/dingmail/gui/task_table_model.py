@@ -6,9 +6,8 @@ from PySide6 import QtCore, QtGui
 
 from ..task_models import MailTask
 from ..task_status import TaskStatus
-from .main_support import STATUS_ROW_COLORS
 from .task_runtime import TaskRuntimeController
-from .theme import status_tone
+from .theme import STATUS_ROW_COLORS, status_tone
 
 
 class TaskTableModel(QtCore.QAbstractTableModel):
@@ -26,6 +25,7 @@ class TaskTableModel(QtCore.QAbstractTableModel):
         super().__init__(parent)
         self._tasks: list[MailTask] = []
         self._runtime: TaskRuntimeController | None = None
+        self._snapshots: dict[str, tuple] = {}
         self._status_font = QtGui.QFont()
         self._status_font.setBold(True)
         self._status_foreground = QtGui.QColor(self.STATUS_FOREGROUND)
@@ -37,7 +37,12 @@ class TaskTableModel(QtCore.QAbstractTableModel):
         self.beginResetModel()
         self._tasks = tasks
         self._runtime = runtime
+        self._snapshots.clear()
         self.endResetModel()
+
+    def bound_to(self, tasks: list[MailTask]) -> bool:
+        """当前数据源是否就是该列表对象（避免同列表反复 reset 丢失选择）。"""
+        return self._tasks is tasks
 
     def task_at(self, row: int) -> MailTask:
         return self._tasks[row]
@@ -46,13 +51,29 @@ class TaskTableModel(QtCore.QAbstractTableModel):
     def runtime(self) -> TaskRuntimeController | None:
         return self._runtime
 
-    def refresh(self) -> None:
-        """任务状态/文本变化后通知视图重绘（不重置选择、不触发行高重算）。"""
-        if not self._tasks:
-            return
-        top_left = self.index(0, 0)
-        bottom_right = self.index(len(self._tasks) - 1, len(self.HEADERS) - 1)
-        self.dataChanged.emit(top_left, bottom_right)
+    def refresh(self) -> bool:
+        """任务状态/文本变化后通知视图重绘。返回是否有行发生变化。
+
+        只有快照发生变化的行才发 dataChanged：无谓的 dataChanged 会让代理
+        模型重排并在某些场景清空用户选择。调用方需在发生变化后让代理模型
+        重刷过滤（dataChanged 不会让代理插入新匹配的行）。
+        """
+        if self._runtime is None or not self._tasks:
+            return False
+        changed_rows: list[int] = []
+        for row, task in enumerate(self._tasks):
+            state = self._runtime.state_for(task)
+            key = (state.status, state.error_message, state.last_result, task.subject, task.last_delivery_status)
+            if self._snapshots.get(task.task_id) != key:
+                self._snapshots[task.task_id] = key
+                changed_rows.append(row)
+        live_ids = {task.task_id for task in self._tasks}
+        for stale_id in list(self._snapshots):
+            if stale_id not in live_ids:
+                del self._snapshots[stale_id]
+        for row in changed_rows:
+            self.dataChanged.emit(self.index(row, 0), self.index(row, len(self.HEADERS) - 1))
+        return bool(changed_rows)
 
     # ---- QAbstractTableModel ----
 
@@ -151,6 +172,10 @@ class TaskFilterProxyModel(QtCore.QSortFilterProxyModel):
         if normalized != self._search_text:
             self._search_text = normalized
             self._refilter()
+
+    def refilter(self) -> None:
+        """校验状态批量变化后重刷过滤（dataChanged 不会插入新匹配的行）。"""
+        self._refilter()
 
     def _refilter(self) -> None:
         # Qt 6.10 起 invalidateFilter/invalidateRowsFilter 均弃用，改用 begin/endFilterChange

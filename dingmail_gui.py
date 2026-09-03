@@ -17,12 +17,12 @@ def _is_frozen() -> bool:
 
 def main() -> int:
     try:
-        from dingmail.gui.main import run
+        from dingmail.gui.app import run
     except ModuleNotFoundError:
         if _is_frozen():
             raise
         _ensure_src_on_path()
-        from dingmail.gui.main import run
+        from dingmail.gui.app import run
 
     return run()
 
