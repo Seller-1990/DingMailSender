@@ -77,12 +77,12 @@ class MainWindowGuiTests(unittest.TestCase):
     def _process_events(self) -> None:
         self._app.processEvents()
 
-    def _create_window(self) -> MainWindow:
+    def _create_window(self, *, profile: ConnectionProfile | None = None) -> MainWindow:
         with (
             patch("dingmail.gui.main_window.detect_home_dir", return_value=self.home_dir),
             patch(
                 "dingmail.gui.services.connection.load_connection_profile_with_metadata",
-                return_value=ConnectionProfileLoadResult(profile=ConnectionProfile()),
+                return_value=ConnectionProfileLoadResult(profile=profile or ConnectionProfile()),
             ),
             patch.object(QtWidgets.QSystemTrayIcon, "isSystemTrayAvailable", return_value=False),
         ):
@@ -491,6 +491,30 @@ class MainWindowGuiTests(unittest.TestCase):
         self.assertEqual("settings", window.app_settings.nav_page)
         saved = json.loads((self.home_dir / "state.json").read_text(encoding="utf-8"))
         self.assertEqual("settings", saved["nav_page"])
+
+    def test_nav_rail_connect_button_jumps_to_settings(self) -> None:
+        window = self._create_window()
+        window.show()
+        self._process_events()
+
+        # 未连接时导航栏显示「连接」按钮，点击跳设置页
+        self.assertTrue(window._nav_rail._connect_button.isVisible())
+        window._nav_rail._connect_button.click()
+        self.assertIs(window._stack.currentWidget(), window.settings_page)
+
+        window.connection._set_connected(True, "ok")
+        self._process_events()
+        self.assertFalse(window._nav_rail._connect_button.isVisible())
+
+    def test_startup_auto_connects_when_credentials_saved(self) -> None:
+        with patch("dingmail.gui.main_window.QtCore.QTimer.singleShot") as single_shot_mock:
+            self._create_window(
+                profile=ConnectionProfile(from_email="op@example.com", smtp_password="token")
+            )
+
+        # 凭据齐全时启动应安排一次自动连接
+        calls = [c for c in single_shot_mock.call_args_list if c.args and c.args[1].__name__ == "try_auto_connect"]
+        self.assertEqual(1, len(calls))
 
 
 if __name__ == "__main__":

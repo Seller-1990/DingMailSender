@@ -133,6 +133,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 连接
         self.connection.statusChanged.connect(self._on_connection_status)
+        self._nav_rail.connectClicked.connect(self._go_connect)
         self.settings_page.openHomeDirRequested.connect(lambda: self._open_path(self._home_dir))
 
         # 投递
@@ -190,6 +191,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._set_status(f"已清理 {removed} 个超过 {self.app_settings.runs_retention_days} 天的运行记录目录。")
 
         self.connection.statusChanged.emit(self.connection.connected, "未连接")
+
+        # 凭据齐全时启动即静默自动连接，让定时队列重启后无需人工干预
+        if self.connection.smtp_cfg.username.strip() and self.connection.password:
+            QtCore.QTimer.singleShot(0, self.connection.try_auto_connect)
 
     # ---- 导航 ----
 
@@ -560,6 +565,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._show_error("发送失败" if kind_name == "send" else "保存草稿失败", error_summary(tb), details=tb)
 
     # ---- 连接 ----
+
+    def _go_connect(self) -> None:
+        """导航栏「连接」入口：跳到设置页聚焦连接表单。"""
+        self.switch_page("settings")
+        self.settings_page.focus_connection_form()
 
     def _on_connection_status(self, connected: bool, detail: str) -> None:
         self._nav_rail.set_connection_status(connected, "已连接" if connected else detail or "未连接")

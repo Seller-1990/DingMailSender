@@ -8,7 +8,6 @@ from .theme import (
     BORDER,
     PRIMARY,
     RAIL_ACTIVE,
-    RAIL_BG,
     TEXT_MUTED,
     TEXT_ON_DARK,
     repolish,
@@ -41,6 +40,7 @@ class NavRail(QtWidgets.QFrame):
     """左侧深色图标导航栏。"""
 
     pageChanged = QtCore.Signal(str)
+    connectClicked = QtCore.Signal()
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -80,6 +80,13 @@ class NavRail(QtWidgets.QFrame):
             layout.addWidget(button)
 
         layout.addStretch(1)
+        self._connect_button = QtWidgets.QToolButton()
+        self._connect_button.setText("连接")
+        self._connect_button.setObjectName("RailConnectButton")
+        self._connect_button.clicked.connect(self.connectClicked.emit)
+        self._connect_button.setVisible(False)
+        layout.addWidget(self._connect_button)
+
         self._status_label = QtWidgets.QLabel("未连接")
         self._status_label.setAlignment(QtCore.Qt.AlignCenter)
         self._status_label.setWordWrap(True)
@@ -91,6 +98,9 @@ class NavRail(QtWidgets.QFrame):
         display = text if text in ("已连接", "未连接") else ("已连接" if connected else text)
         self._status_label.setText(display)
         self._status_label.setStyleSheet(f"color: {color}; font-size: 10px; background: transparent;")
+        # 未连接时给出可点击的「连接」入口（跳设置页），已连接则隐藏
+        self._connect_button.setVisible(not connected)
+        self._connect_button.setEnabled("正在" not in display)
 
     def set_active(self, key: str, *, emit: bool = False) -> None:
         for name, button in self._buttons.items():

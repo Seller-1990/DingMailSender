@@ -122,6 +122,13 @@ class SettingsPage(QtWidgets.QWidget):
         self._imap_port_input.setValue(self._connection.imap_port or 993)
         self._refresh_profile_labels()
 
+    def focus_connection_form(self) -> None:
+        """从导航栏「连接」进入时，把焦点放到第一个待填字段。"""
+        if self._email_input.text().strip():
+            self._password_input.setFocus()
+        else:
+            self._email_input.setFocus()
+
     @staticmethod
     def _last_error(tb: str) -> str:
         lines = [line.strip() for line in str(tb or "").splitlines() if line.strip()]

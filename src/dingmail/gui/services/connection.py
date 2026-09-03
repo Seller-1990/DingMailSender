@@ -52,8 +52,7 @@ class ConnectionService(QtCore.QObject):
     def load_saved_profile(self) -> None:
         try:
             result = load_connection_profile_with_metadata(self.conn_config_path, *self.legacy_paths)
-        except ConnectionProfileLoadError as exc:
-            self.profile_warning = ""
+        except ConnectionProfileLoadError:
             raise
         profile = result.profile
         if profile.from_email:
