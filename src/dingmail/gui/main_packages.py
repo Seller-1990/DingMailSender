@@ -128,6 +128,13 @@ class MainPackageMixin:
             retention = self._runs_retention_days
         self._send_rate_limit_seconds = min(max(rate_limit, 0.0), 600.0)
         self._runs_retention_days = min(max(retention, 0), 3650)
+        raw_sizes = raw.get("splitter_sizes")
+        if isinstance(raw_sizes, list) and len(raw_sizes) == 2:
+            try:
+                self._splitter_sizes = [max(int(v), 0) for v in raw_sizes]
+                self._workspace_splitter.setSizes(self._splitter_sizes)
+            except (TypeError, ValueError):
+                self._splitter_sizes = []
 
     def _save_app_state(self) -> None:
         try:
@@ -135,6 +142,7 @@ class MainPackageMixin:
                 "last_package_dir": str(self._package_dir) if self._package_dir else "",
                 "send_rate_limit_seconds": self._send_rate_limit_seconds,
                 "runs_retention_days": self._runs_retention_days,
+                "splitter_sizes": self._splitter_sizes,
             }
             self._app_state_path().write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2),

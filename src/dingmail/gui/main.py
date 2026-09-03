@@ -29,7 +29,7 @@ class MainWindow(MainUiMixin, MainViewMixin, MainTaskMixin, MainDeliveryMixin, Q
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"钉钉邮件发送 v{__version__}")
-        self.resize(1420, 880)
+        self.resize(1560, 960)
         # 小屏（1366x768）以下继续缩会挤压双栏工作台到不可用，给出硬下限
         self.setMinimumSize(1180, 720)
 
@@ -145,9 +145,8 @@ class MainWindow(MainUiMixin, MainViewMixin, MainTaskMixin, MainDeliveryMixin, Q
 
     def _refresh_smtp_summary_labels(self) -> None:
         sender = self._smtp_cfg.username.strip() or "未配置"
-        self._account_label.setText(f"账号：{sender}")
-        self._server_label.setText(
-            f"服务器：{self._smtp_cfg.host}:{self._smtp_cfg.port} / {self._smtp_cfg.security.upper()}"
+        self._account_label.setText(
+            f"账号：{sender} ｜ {self._smtp_cfg.host}:{self._smtp_cfg.port} / {self._smtp_cfg.security.upper()}"
         )
         if hasattr(self, "_profile_source_label"):
             self._profile_source_label.setText(self._connection_profile_source_text)
@@ -265,6 +264,7 @@ for _attr_name, _state_name in {
     "_active_filter": "active_filter",
     "_send_rate_limit_seconds": "send_rate_limit_seconds",
     "_runs_retention_days": "runs_retention_days",
+    "_splitter_sizes": "splitter_sizes",
     "_connection_profile_error": "connection_profile_error",
     "_connection_profile_source_text": "connection_profile_source_text",
     "_connection_profile_source_detail": "connection_profile_source_detail",

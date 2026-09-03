@@ -48,14 +48,13 @@ class MainTaskTableMixin:
         self._open_last_run_btn.setEnabled(True)
 
     def _refresh_package_summary(self) -> None:
+        # 单行展示节省顶栏高度；完整目录信息放 tooltip
         if self._package_dir:
-            self._package_label.setText(
-                f"任务包：{self._package_dir.name}\n目录：{self._package_dir}\n工作目录：{self._home_dir}"
-            )
+            self._package_label.setText(f"任务包：{self._package_dir.name}")
+            self._package_label.setToolTip(f"目录：{self._package_dir}\n工作目录：{self._home_dir}")
         else:
-            self._package_label.setText(
-                f"任务包：未导入\n工作目录：{self._home_dir}\n模板目录：{self._package_root()}"
-            )
+            self._package_label.setText("任务包：未导入")
+            self._package_label.setToolTip(f"工作目录：{self._home_dir}\n模板目录：{self._package_root()}")
 
     def _refresh_status_line(self, selected_count: int, has_selection: bool) -> None:
         enabled_tasks = [task for task in self._tasks if task.enabled]

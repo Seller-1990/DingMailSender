@@ -32,11 +32,11 @@ class MetricTile(QtWidgets.QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("MetricTile")
-        self.setMinimumHeight(86)
+        self.setMinimumHeight(56)
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(6)
+        layout.setContentsMargins(10, 7, 10, 7)
+        layout.setSpacing(2)
 
         self._title = QtWidgets.QLabel(title)
         self._title.setObjectName("MetricTitle")
@@ -73,8 +73,8 @@ class SectionPanel(QtWidgets.QFrame):
         header = QtWidgets.QFrame()
         header.setObjectName("PanelHeader")
         header_layout = QtWidgets.QHBoxLayout(header)
-        header_layout.setContentsMargins(14, 12, 14, 12)
-        header_layout.setSpacing(12)
+        header_layout.setContentsMargins(12, 7, 12, 7)
+        header_layout.setSpacing(10)
 
         title_box = QtWidgets.QVBoxLayout()
         title_box.setContentsMargins(0, 0, 0, 0)
@@ -97,8 +97,8 @@ class SectionPanel(QtWidgets.QFrame):
 
         self.body = QtWidgets.QWidget()
         self.body_layout = QtWidgets.QVBoxLayout(self.body)
-        self.body_layout.setContentsMargins(14, 14, 14, 14)
-        self.body_layout.setSpacing(12)
+        self.body_layout.setContentsMargins(10, 10, 10, 10)
+        self.body_layout.setSpacing(10)
 
         root.addWidget(header)
         root.addWidget(self.body, 1)

@@ -27,8 +27,8 @@ class MainUiMixin:
     def _build_main_area(self) -> QtWidgets.QWidget:
         main = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(main)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(10)
 
         layout.addWidget(self._build_topbar())
         layout.addWidget(self._build_commandbar())
@@ -40,7 +40,9 @@ class MainUiMixin:
         self._workspace_splitter.addWidget(self._build_detail_panel())
         self._workspace_splitter.setStretchFactor(0, 3)
         self._workspace_splitter.setStretchFactor(1, 2)
-        self._workspace_splitter.setSizes([840, 560])
+        self._workspace_splitter.setSizes([940, 560])
+        # 分栏位置记忆：拖动后写 state.json，启动恢复
+        self._workspace_splitter.splitterMoved.connect(self._remember_splitter_sizes)
         layout.addWidget(self._workspace_splitter, 1)
         layout.addWidget(self._build_runbar())
         return main
@@ -49,7 +51,7 @@ class MainUiMixin:
         topbar = QtWidgets.QFrame()
         topbar.setObjectName("Topbar")
         layout = QtWidgets.QHBoxLayout(topbar)
-        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(10)
 
         title_box = QtWidgets.QVBoxLayout()
@@ -57,20 +59,13 @@ class MainUiMixin:
         title_box.setSpacing(3)
         title = QtWidgets.QLabel("DingMail 工作台")
         title.setObjectName("AppTitle")
-        subtitle = QtWidgets.QLabel("草稿复核优先")
-        subtitle.setObjectName("MutedLabel")
         title_box.addWidget(title)
-        title_box.addWidget(subtitle)
 
-        self._package_label = label_value(
-            f"任务包：未导入\n工作目录：{self._home_dir}\n模板目录：{packages_dir(self._home_dir)}"
-        )
+        self._package_label = label_value("任务包：未导入")
         self._package_label.setObjectName("MutedLabel")
 
         self._account_label = label_value("")
         self._account_label.setObjectName("MutedLabel")
-        self._server_label = label_value("")
-        self._server_label.setObjectName("MutedLabel")
         self._profile_source_label = label_value("")
         self._profile_source_label.setObjectName("MutedLabel")
         self._smtp_status_badge = StatusTag("未连接", variant="neutral")
@@ -79,7 +74,7 @@ class MainUiMixin:
 
         connection_box = QtWidgets.QVBoxLayout()
         connection_box.setContentsMargins(0, 0, 0, 0)
-        connection_box.setSpacing(4)
+        connection_box.setSpacing(2)
         connection_row = QtWidgets.QHBoxLayout()
         connection_row.setContentsMargins(0, 0, 0, 0)
         connection_row.setSpacing(8)
@@ -87,7 +82,6 @@ class MainUiMixin:
         connection_row.addWidget(self._connect_btn)
         connection_box.addLayout(connection_row)
         connection_box.addWidget(self._account_label)
-        connection_box.addWidget(self._server_label)
         connection_box.addWidget(self._profile_source_label)
 
         layout.addLayout(title_box)
@@ -99,7 +93,7 @@ class MainUiMixin:
         commandbar = QtWidgets.QFrame()
         commandbar.setObjectName("Topbar")
         layout = QtWidgets.QHBoxLayout(commandbar)
-        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setContentsMargins(12, 6, 12, 6)
         layout.setSpacing(8)
 
         self._download_package_btn = make_button("下载模板")
@@ -133,8 +127,8 @@ class MainUiMixin:
     def _build_metrics(self) -> QtWidgets.QGridLayout:
         metrics = QtWidgets.QGridLayout()
         metrics.setContentsMargins(0, 0, 0, 0)
-        metrics.setHorizontalSpacing(12)
-        metrics.setVerticalSpacing(12)
+        metrics.setHorizontalSpacing(10)
+        metrics.setVerticalSpacing(8)
         specs = [
             ("enabled", "启用任务", "0", "当前任务包"),
             ("ready", "可保存草稿", "0", "校验通过"),
@@ -222,9 +216,20 @@ class MainUiMixin:
     def _apply_search_text(self) -> None:
         self._task_proxy.set_search_text(self._task_search_input.text())
 
+    def _remember_splitter_sizes(self, _pos: int, _index: int) -> None:
+        # 拖动结束 500ms 后落盘（防抖），避免拖动过程中频繁写盘
+        if not hasattr(self, "_splitter_save_timer"):
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(500)
+            timer.timeout.connect(self._save_app_state)
+            self._splitter_save_timer = timer
+        self._splitter_sizes = list(self._workspace_splitter.sizes())
+        self._splitter_save_timer.start()
+
     def _build_detail_panel(self) -> SectionPanel:
         panel = SectionPanel("草稿复核", "保存草稿是主路径；立即发送作为风险操作保留。")
-        panel.setMinimumWidth(440)
+        panel.setMinimumWidth(420)
 
         self._detail_status_tag = StatusTag("未选择", variant="neutral")
         panel.actions_layout.addWidget(self._detail_status_tag)
@@ -253,7 +258,7 @@ class MainUiMixin:
         self._detail_preview_browser = QtWidgets.QTextBrowser()
         self._detail_preview_browser.setOpenExternalLinks(False)
         self._detail_preview_browser.setOpenLinks(False)
-        self._detail_preview_browser.setMinimumHeight(340)
+        self._detail_preview_browser.setMinimumHeight(240)
         self._detail_preview_browser.anchorClicked.connect(self._confirm_open_link_from_detail)
         panel.body_layout.addWidget(self._detail_preview_browser, 1)
 
@@ -277,7 +282,7 @@ class MainUiMixin:
         runbar = QtWidgets.QFrame()
         runbar.setObjectName("Runbar")
         layout = QtWidgets.QHBoxLayout(runbar)
-        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(10)
 
         self._status_label = label_value("当前没有任务包。")

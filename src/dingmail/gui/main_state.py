@@ -31,6 +31,7 @@ class MainWindowState:
     active_filter: str = "all"
     send_rate_limit_seconds: float = DEFAULT_RATE_LIMIT_SECONDS
     runs_retention_days: int = 0
+    splitter_sizes: list[int] = field(default_factory=list)
     connection_profile_error: str = ""
     connection_profile_source_text: str = "配置：默认参数（未保存）"
     connection_profile_source_detail: str = ""

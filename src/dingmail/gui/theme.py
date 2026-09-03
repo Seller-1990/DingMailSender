@@ -61,7 +61,7 @@ WORKBENCH_QSS = """
             border-bottom: 1px solid #d8e0ea;
         }
         QLabel#AppTitle {
-            font-size: 18px;
+            font-size: 15px;
             font-weight: 700;
             color: #172033;
         }
@@ -87,17 +87,17 @@ WORKBENCH_QSS = """
         }
         QLabel#MetricTitle {
             color: #64748b;
-            font-size: 12px;
+            font-size: 11px;
             font-weight: 600;
         }
         QLabel#MetricValue {
             color: #172033;
-            font-size: 24px;
+            font-size: 17px;
             font-weight: 700;
         }
         QLabel#StatusTag {
             border-radius: 10px;
-            padding: 4px 9px;
+            padding: 3px 8px;
             font-weight: 700;
             border: 1px solid transparent;
         }
