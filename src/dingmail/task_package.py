@@ -102,8 +102,21 @@ def package_relpath(package_dir: Path, path: Path) -> str:
         raise ValueError(f"路径必须位于任务包目录内：{path.resolve()}")
 
 
+_RESOLVED_PACKAGE_ROOTS: dict[Path, Path] = {}
+
+
+def _package_root(package_dir: Path) -> Path:
+    """包根 realpath 按 Path 对象缓存：同一包内成百上千次路径校验共享一次 realpath。"""
+    key = Path(package_dir)
+    cached = _RESOLVED_PACKAGE_ROOTS.get(key)
+    if cached is None:
+        cached = key.resolve()
+        _RESOLVED_PACKAGE_ROOTS[key] = cached
+    return cached
+
+
 def _resolve_within_package(package_dir: Path, path: Path) -> Path:
-    package_root = package_dir.resolve()
+    package_root = _package_root(package_dir)
     resolved = path.resolve() if path.is_absolute() else (package_root / path).resolve()
     try:
         resolved.relative_to(package_root)
@@ -301,10 +314,26 @@ def _mail_task_from_row(row: tuple[object, ...], header_map: dict[str, int]) -> 
         return _row_value(row, header_map, column)
 
     scheduled_at: datetime | None = None
+    schedule_raw = str(value("定时发送时间") or "").strip()
     try:
-        scheduled_at = parse_datetime(value("定时发送时间"))
+        scheduled_at = parse_datetime(schedule_raw)
     except ValueError:
-        pass
+        # 无法解析的定时时间不能静默清空（会在保存时覆盖原值丢数据）：
+        # 保留原始文本到备注列，提醒用户手动修正
+        return MailTask(
+            task_id=str(value("任务ID") or "").strip(),
+            enabled=parse_bool(value("是否启用")) if value("是否启用") is not None else True,
+            to_recipients=split_emails(str(value("收件人") or "")),
+            cc_recipients=split_emails(str(value("抄送人") or "")),
+            subject=str(value("主题") or "").strip(),
+            intro_text=str(value("开头/补充内容") or ""),
+            markdown_path=str(value("Markdown路径") or "").strip(),
+            attachment_paths=split_paths(str(value("附件路径") or "")),
+            schedule_enabled=parse_bool(value("是否定时发送")),
+            scheduled_at=None,
+            note=(str(value("备注") or "").strip() + f"；[定时发送时间无法解析：{schedule_raw}]").strip("；"),
+            last_delivery_status=str(value("最近结果") or "").strip(),
+        )
 
     return MailTask(
         task_id=str(value("任务ID") or "").strip(),

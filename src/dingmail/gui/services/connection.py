@@ -124,6 +124,7 @@ class ConnectionService(QtCore.QObject):
         return True
 
     def _on_test_ok(self, info: str) -> None:
+        self._release_worker()
         self._worker = None
         message = self.apply_connection_success(
             from_email=self._pending_email,
@@ -135,6 +136,7 @@ class ConnectionService(QtCore.QObject):
         self.testSucceeded.emit(message)
 
     def _on_test_err(self, tb: str) -> None:
+        self._release_worker()
         self._worker = None
         self.statusChanged.emit(False, "连接失败")
         self.testFailed.emit(tb)
@@ -192,14 +194,21 @@ class ConnectionService(QtCore.QObject):
         return True
 
     def _on_auto_connect_ok(self, info: str) -> None:
+        self._release_worker()
         self._worker = None
         self._set_connected(True, info)
 
     def _on_auto_connect_err(self, tb: str) -> None:
+        self._release_worker()
         self._worker = None
         # 状态徽标即反馈；下个调度周期会自动重试，不清空已存授权码
         self._set_connected(False, "自动连接失败")
         self.autoConnectFailed.emit(tb)
+
+    def _release_worker(self) -> None:
+        if self._worker is not None:
+            # deleteLater 延迟到事件循环安全点析构，避免线程清理竞态 abort
+            self._worker.deleteLater()
 
     # ---- 状态 ----
 

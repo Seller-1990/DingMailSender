@@ -97,20 +97,30 @@ class DeliveryService(QtCore.QObject):
     # ---- 完成 ----
 
     def _on_send_ok(self, result) -> None:
+        self._release_worker(self._send_worker)
         self._send_worker = None
         self.sendFinished.emit(result)
 
     def _on_draft_ok(self, result) -> None:
+        self._release_worker(self._draft_worker)
         self._draft_worker = None
         self.draftFinished.emit(result)
 
     def _on_send_err(self, tb: str) -> None:
+        self._release_worker(self._send_worker)
         self._send_worker = None
         self.failed.emit("send", tb)
 
     def _on_draft_err(self, tb: str) -> None:
+        self._release_worker(self._draft_worker)
         self._draft_worker = None
         self.failed.emit("draft", tb)
+
+    @staticmethod
+    def _release_worker(worker) -> None:
+        if worker is not None:
+            # deleteLater 延迟到事件循环安全点析构，避免线程清理竞态 abort
+            worker.deleteLater()
 
     # ---- 取消与等待 ----
 
@@ -120,8 +130,13 @@ class DeliveryService(QtCore.QObject):
                 worker.request_cancel()
 
     def wait_all(self, timeout_ms: int) -> bool:
-        """等待所有投递 worker 结束；超时返回 False。"""
+        """等待所有投递 worker 结束；超时返回 False。
+
+        成功路径还需排空 queued 完成信号（在返回 True 前处理事件），
+        否则退出时会丢掉 finished_ok → 发送结果不回写 tasks.xlsx。
+        """
         for worker in (self._send_worker, self._draft_worker):
             if worker is not None and not worker.wait(timeout_ms):
                 return False
-        return True
+        QtCore.QCoreApplication.processEvents()
+        return self._send_worker is None and self._draft_worker is None

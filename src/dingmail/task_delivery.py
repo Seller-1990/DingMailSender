@@ -123,6 +123,9 @@ def _close_logger(logger: logging.Logger) -> None:
     for handler in list(logger.handlers):
         handler.close()
         logger.removeHandler(handler)
+    # logging.Manager 永久持有 logger 引用；每轮 run 一个名字会无限累积，
+    # 用完即从注册表摘除，防止长驻进程内存缓慢泄漏
+    logging.Logger.manager.loggerDict.pop(logger.name, None)
 
 
 def _build_message_from_rendered(

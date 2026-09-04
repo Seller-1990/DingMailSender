@@ -113,7 +113,7 @@ def render_task_preview_html(task: MailTask, package_dir: Path) -> str:
     if not composed_markdown:
         raise ValueError("邮件正文为空")
     html = wrap_email_html(markdown_to_html(composed_markdown))
-    return rewrite_local_images_for_preview(html, markdown_parent)
+    return rewrite_local_images_for_preview(html, markdown_parent, containment_root=package_dir)
 
 
 def render_task_email(task: MailTask, package_dir: Path) -> RenderedTaskEmail:
@@ -125,8 +125,8 @@ def render_task_email(task: MailTask, package_dir: Path) -> RenderedTaskEmail:
     asset_errors = _validate_task_assets(task, package_dir, html, markdown_parent)
     if asset_errors:
         raise ValueError("；".join(asset_errors))
-    html_for_preview = rewrite_local_images_for_preview(html, markdown_parent)
-    html_for_email, inline_images = embed_cid_images(html, markdown_parent)
+    html_for_preview = rewrite_local_images_for_preview(html, markdown_parent, containment_root=package_dir)
+    html_for_email, inline_images = embed_cid_images(html, markdown_parent, containment_root=package_dir)
     attachments = _resolve_attachments(task, package_dir)
 
     return RenderedTaskEmail(
@@ -150,7 +150,7 @@ def _validate_task_assets(
 ) -> list[str]:
     errors: list[str] = []
     total_bytes = 0
-    image_paths, image_errors = inspect_local_images(html, markdown_parent)
+    image_paths, image_errors = inspect_local_images(html, markdown_parent, containment_root=package_dir)
     errors.extend(image_errors)
     for image in image_paths:
         size = image.stat().st_size

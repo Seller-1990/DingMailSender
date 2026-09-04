@@ -187,7 +187,13 @@ def migrate_connection_profile_if_needed(result: ConnectionProfileLoadResult, ta
     profile = result.profile
     if not profile.from_email and not profile.smtp_password:
         return None
-    saved_path = save_connection_profile(target_path, from_email=profile.from_email, smtp_password=profile.smtp_password)
+    saved_path = save_connection_profile(
+        target_path,
+        from_email=profile.from_email,
+        smtp_password=profile.smtp_password,
+        imap_host=profile.imap_host,
+        imap_port=profile.imap_port,
+    )
     source_path = result.source_path.resolve()
     if source_path != saved_path.resolve():
         try:

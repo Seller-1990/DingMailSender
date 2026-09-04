@@ -160,6 +160,9 @@ class ImapDraftsSession:
         for raw in boxes:
             if not raw:
                 continue
+            # imaplib 对含 literal 的响应（中文等非 ASCII 邮箱名）返回 (bytes, bytes) 元组
+            if isinstance(raw, tuple):
+                raw = b" ".join(part for part in raw if isinstance(part, bytes))
             line = raw.decode("utf-8", errors="ignore")
             name = self._extract_mailbox_name(line)
             if not name:

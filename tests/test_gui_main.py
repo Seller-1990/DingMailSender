@@ -516,6 +516,66 @@ class MainWindowGuiTests(unittest.TestCase):
         calls = [c for c in single_shot_mock.call_args_list if c.args and c.args[1].__name__ == "try_auto_connect"]
         self.assertEqual(1, len(calls))
 
+    def test_scheduler_skips_when_modal_dialog_open(self) -> None:
+        """模态对话框的嵌套事件循环里调度器不得启动发送（F1 Critical 回归）。"""
+        package_dir = self._create_package_dir("modal")
+        self._save_package(
+            package_dir,
+            [
+                MailTask(
+                    task_id="task-due",
+                    to_recipients=["a@example.com"],
+                    subject="到期任务",
+                    markdown_path="content/body.md",
+                    schedule_enabled=True,
+                    scheduled_at=datetime.now() - timedelta(minutes=1),
+                )
+            ],
+        )
+
+        window = self._create_window()
+        window.load_package(package_dir)
+        window.connection.connected = True
+        window.connection.password = "token"
+        window.tasks.runtime.queued_task_ids.add("task-due")
+
+        from PySide6 import QtWidgets as _qtw
+
+        dialog = _qtw.QDialog(window)  # 模拟已打开的模态对话框
+        dialog.open()
+        try:
+            with patch.object(window.delivery, "start_send", return_value=True) as send_mock:
+                window.process_scheduled_tasks()
+            send_mock.assert_not_called()
+        finally:
+            dialog.done(_qtw.QDialog.Accepted)
+
+    def test_idle_scheduler_tick_does_not_emit_tasks_changed(self) -> None:
+        """无到期任务的空转 tick 不得触发 tasksChanged（F6 回归：避免预览重渲染）。"""
+        package_dir = self._create_package_dir("idle")
+        self._save_package(
+            package_dir,
+            [
+                MailTask(
+                    task_id="task-1",
+                    to_recipients=["a@example.com"],
+                    subject="主题",
+                    markdown_path="content/body.md",
+                )
+            ],
+        )
+
+        window = self._create_window()
+        window.load_package(package_dir)
+        window.connection.connected = True
+
+        emitted = []
+        window.tasks.tasksChanged.connect(lambda: emitted.append(1))
+        window.process_scheduled_tasks()  # 首次 tick 初始化 due 签名，允许一次刷新
+        window.process_scheduled_tasks()
+        window.process_scheduled_tasks()
+        self.assertEqual(1, len(emitted))
+
 
 if __name__ == "__main__":
     unittest.main()

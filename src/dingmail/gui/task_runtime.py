@@ -105,11 +105,12 @@ class TaskRuntimeController:
     def mark_previewed(self, task: MailTask, when: datetime) -> None:
         self.state_for(task).last_previewed_at = when
 
-    def validate_task(self, task: MailTask, *, check_schedule_time: bool) -> list[str]:
+    def validate_task(self, task: MailTask, *, check_schedule_time: bool, signature: tuple | None = None) -> list[str]:
         if not self._package_dir:
             return ["未导入任务包"]
         if not check_schedule_time:
-            signature = self._task_validation_signature(task)
+            if signature is None:
+                signature = self._task_validation_signature(task)
             cached = self._validation_cache.get(task.task_id)
             if cached and cached[0] == signature:
                 return list(cached[1])
@@ -117,7 +118,7 @@ class TaskRuntimeController:
         errors = validate_task(task, self._package_dir, now=datetime.now() if check_schedule_time else None)
 
         if not check_schedule_time:
-            self._validation_cache[task.task_id] = (self._task_validation_signature(task), list(errors))
+            self._validation_cache[task.task_id] = (signature, list(errors))
         return errors
 
     def partition_valid_tasks(
@@ -148,17 +149,32 @@ class TaskRuntimeController:
         if not self._package_dir:
             return True
         unchecked_count = 0
+        # 增量模式下每 tick 只对轮转窗口内的任务做 stat 比对（发现文件变化），
+        # 窗口外且已有非 UNCHECKED 状态的任务沿用缓存状态——
+        # 否则每 tick 对全部任务 stat（O(N) 文件系统调用）会让大包在 UI 线程卡顿
+        stat_probe_count = 0
+        STAT_PROBE_BUDGET = 20
         for task in tasks:
             state = self.state_for(task)
             if not task.enabled:
                 state.status = TaskStatus.DISABLED
                 state.error_message = ""
                 continue
-            # 检查缓存是否命中
+            # 检查缓存是否命中（signature 只算一次，传给 validate_task 复用）
+            signature = None
+            cache_hit = True
             if max_validate > 0:
-                signature = self._task_validation_signature(task)
+                may_probe = (
+                    state.status == TaskStatus.UNCHECKED
+                    or stat_probe_count < STAT_PROBE_BUDGET
+                )
+                if may_probe:
+                    if state.status != TaskStatus.UNCHECKED:
+                        stat_probe_count += 1
+                    signature = self._task_validation_signature(task)
                 cached = self._validation_cache.get(task.task_id)
-                if cached is None or cached[0] != signature:
+                cache_hit = cached is not None and cached[0] == signature
+                if not cache_hit:
                     unchecked_count += 1
                     if unchecked_count > max_validate:
                         # 超出本轮限制，跳过（保持 UNCHECKED 状态）
@@ -168,7 +184,10 @@ class TaskRuntimeController:
                             state.status = TaskStatus.UNCHECKED
                             continue
                         continue
-            errors = self.validate_task(task, check_schedule_time=False)
+            elif state.status == TaskStatus.UNCHECKED:
+                # 全量模式下也要识别未校验任务
+                cache_hit = False
+            errors = self.validate_task(task, check_schedule_time=False, signature=signature)
             if errors:
                 state.status = TaskStatus.VALIDATION_FAILED
                 state.error_message = "\n".join(errors)
@@ -344,6 +363,11 @@ class TaskRuntimeController:
             stat = resolved.stat()
         except FileNotFoundError:
             return ("missing", str(resolved))
+        except OSError:
+            return ("missing", str(resolved))
+        # 注意：不做 realpath（nt._getfinalpathname 是本次剖析的最大热点）。
+        # resolve_user_path 已保证 resolved 在包内且规范化（\..\、大小写别名已消解），
+        # 其 str 结果在同进程内足够稳定作为签名分量。
         return ("file", str(resolved), stat.st_mtime_ns, stat.st_size)
 
     def _state_for_task_id(self, task_id: str) -> TaskRuntimeState:

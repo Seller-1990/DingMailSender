@@ -58,6 +58,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._quit_requested = False
         self._tray: QtWidgets.QSystemTrayIcon | None = None
         self._active_send: tuple[str, list[MailTask], Path] | None = None
+        self._last_due_signature: tuple | None = None
 
         self._build_ui()
         self._build_tray()
@@ -599,6 +600,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def process_scheduled_tasks(self) -> None:
         if self.delivery.busy or self.tasks.package_dir is None:
             return
+        if QtWidgets.QApplication.activeModalWidget() is not None:
+            # 模态对话框（任务编辑/确认框）的嵌套事件循环里不启动发送：
+            # 用户确认后 persists_tasks 会替换任务对象，结果将因失配被丢弃（还会重发）
+            return
         if not self.connection.connected:
             if self.tasks.runtime.queued_task_ids:
                 self.connection.try_auto_connect()
@@ -606,8 +611,13 @@ class MainWindow(QtWidgets.QMainWindow):
         due = self.tasks.due_tasks()
         if due:
             self.start_send(due, queue_mode=True)
-        else:
+        elif self._last_due_signature != self._due_signature():
+            # 只在集合变化时刷 UI，避免每 15s 无谓重渲染预览/重启校验
+            self._last_due_signature = self._due_signature()
             self.tasks.tasksChanged.emit()
+
+    def _due_signature(self) -> tuple:
+        return (len(self.tasks.runtime.queued_task_ids),) + tuple(sorted(self.tasks.runtime.queued_task_ids))
 
     # ---- 托盘/关闭 ----
 
