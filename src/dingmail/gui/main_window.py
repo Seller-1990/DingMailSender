@@ -439,9 +439,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_actions()
 
     def remove_from_queue(self, task_ids: list[str]) -> None:
-        for task_id in task_ids:
-            self.tasks.runtime.queued_task_ids.discard(task_id)
-        self.tasks.tasksChanged.emit()
+        self.tasks.unqueue_tasks(task_ids)
         self._refresh_actions()
 
     def retry_failed_tasks(self) -> None:
@@ -463,6 +461,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "尚未连接 SMTP", "请先到「设置」完成连接测试。")
             return
         self.tasks.mark_sending(tasks)
+        self.tasks.begin_submission()
         self._active_send = ("send", list(tasks), self.tasks.package_dir)
         self._refresh_actions()
         started = self.delivery.start_send(
@@ -481,6 +480,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tasks.package_dir is None or self.delivery.busy or not tasks:
             return
         self.tasks.mark_drafting(tasks)
+        self.tasks.begin_submission()
         self._active_send = ("draft", list(tasks), self.tasks.package_dir)
         self._refresh_actions()
         started = self.delivery.start_drafts(

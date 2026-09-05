@@ -31,6 +31,23 @@ class TaskController(QtCore.QObject):
         self.package_dir: Path | None = None
         self.tasks: list[MailTask] = []
         self.runtime = TaskRuntimeController()
+        # 任务列表代数：persist/load 每次替换列表对象时递增。
+        # 投递结果按「提交时的代数」匹配，取代脆弱的 id() 身份判定；
+        # 失配说明中途换包/重编辑，结果只做计数不再改写当前任务状态。
+        self._generation = 0
+        self._generation_at_submit: int | None = None
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    def begin_submission(self) -> int:
+        """投递提交前记录当前代数；结果应用时用于失配检测。"""
+        self._generation_at_submit = self._generation
+        return self._generation
+
+    def _submission_matches_current(self) -> bool:
+        return self._generation_at_submit is not None and self._generation_at_submit == self._generation
 
     # ---- 任务包 ----
 
@@ -49,6 +66,7 @@ class TaskController(QtCore.QObject):
                     )
         self.package_dir = package_dir
         self.tasks = tasks
+        self._generation += 1
         self.runtime.reset_loaded_tasks(package_dir, self.tasks)
         self.tasksChanged.emit()
         if repairs:
@@ -79,6 +97,7 @@ class TaskController(QtCore.QObject):
             )
             return False
         self.tasks = updated_tasks
+        self._generation += 1
         reset_ids = set(reset_runtime_task_ids)
         for task in self.tasks:
             if task.task_id in reset_ids:
@@ -100,10 +119,13 @@ class TaskController(QtCore.QObject):
         package_dir: Path,
         result: SendTasksResult,
     ) -> tuple[int, int]:
-        if self._result_matches_current(submitted_tasks, package_dir):
+        if self._submission_matches_current() and self._result_matches_current(submitted_tasks, package_dir):
             sent, failed = self.runtime.apply_send_result(submitted_tasks, result)
         else:
+            # 陈旧提交（发送期间换包/重编辑）：结果只计数，不改当前任务状态；
+            # 但旧 worker 已结束，sending 标记必须清理，否则任务永远卡在「发送中」
             sent, failed = self._counts(result, DeliveryStatus.SENT)
+            self.runtime.clear_submission_marks(submitted_tasks)
         self._persist_delivery_status(submitted_tasks, package_dir, result)
         self.tasksChanged.emit()
         return sent, failed
@@ -114,10 +136,11 @@ class TaskController(QtCore.QObject):
         package_dir: Path,
         result: SendTasksResult,
     ) -> tuple[int, int]:
-        if self._result_matches_current(submitted_tasks, package_dir):
+        if self._submission_matches_current() and self._result_matches_current(submitted_tasks, package_dir):
             ok, failed = self.runtime.apply_draft_result(submitted_tasks, result)
         else:
             ok, failed = self._counts(result, DeliveryStatus.DRAFT_SAVED)
+            self.runtime.clear_submission_marks(submitted_tasks)
         self._persist_delivery_status(submitted_tasks, package_dir, result)
         self.tasksChanged.emit()
         return ok, failed
@@ -144,6 +167,18 @@ class TaskController(QtCore.QObject):
 
     def due_tasks(self, now: datetime | None = None) -> list[MailTask]:
         return self.runtime.collect_due_tasks(self.tasks, now=now or datetime.now())
+
+    def queue_tasks(self, task_ids: list[str]) -> None:
+        """把任务加入定时队列（UI 入口统一走这里，不直接改 runtime 集合）。"""
+        for task_id in task_ids:
+            self.runtime.queued_task_ids.add(task_id)
+        self.tasksChanged.emit()
+
+    def unqueue_tasks(self, task_ids: list[str]) -> None:
+        """把任务移出定时队列。"""
+        for task_id in task_ids:
+            self.runtime.queued_task_ids.discard(task_id)
+        self.tasksChanged.emit()
 
     # ---- 内部 ----
 

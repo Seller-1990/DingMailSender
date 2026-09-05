@@ -302,6 +302,7 @@ class MainWindowGuiTests(unittest.TestCase):
         window.load_package(package_dir)
         submitted = list(window.tasks.tasks)
         window.tasks.mark_sending(submitted)
+        window.tasks.begin_submission()
 
         sent, failed = window.tasks.apply_send_result(submitted, package_dir, self._make_result("task-1", "sent"))
 
@@ -575,6 +576,36 @@ class MainWindowGuiTests(unittest.TestCase):
         window.process_scheduled_tasks()
         window.process_scheduled_tasks()
         self.assertEqual(1, len(emitted))
+
+    def test_result_generation_guard_skips_stale_submission(self) -> None:
+        """提交后任务列表被替换（代数递增），结果不得写进新列表状态（F9 回归）。"""
+        package_dir = self._create_package_dir("gen")
+        self._save_package(
+            package_dir,
+            [
+                MailTask(task_id="task-1", to_recipients=["a@example.com"], subject="主题", markdown_path="content/body.md")
+            ],
+        )
+
+        window = self._create_window()
+        window.load_package(package_dir)
+        submitted = list(window.tasks.tasks)
+        window.tasks.mark_sending(submitted)
+        window.tasks.begin_submission()
+
+        # 模拟发送期间用户编辑：persist_tasks 换新列表对象 → 代数递增
+        updated = [MailTask(task_id="task-1", to_recipients=["a@example.com"], subject="新主题", markdown_path="content/body.md")]
+        self.assertTrue(window.tasks.persist_tasks(updated))
+        self.assertNotEqual(window.tasks.generation, window.tasks._generation_at_submit)
+
+        window.tasks.apply_send_result(submitted, package_dir, self._make_result("task-1", "sent"))
+
+        # 新列表对象不得被旧提交的结果置为 SENT
+        self.assertEqual(TaskStatus.UNCHECKED, window.tasks.runtime.status_for(window.tasks.tasks[0]))
+        persisted = load_tasks_from_package(package_dir)
+        self.assertEqual("新主题", persisted[0].subject)
+
+
 
 
 if __name__ == "__main__":

@@ -192,7 +192,7 @@ def _task_row_values(task: MailTask) -> list[object]:
 
 def _snapshot_extra_task_columns(
     worksheet,
-) -> tuple[range, dict[int, object], dict[str, dict[int, object]], dict[int, dict[int, object]]]:
+) -> tuple[range, dict[int, object], dict[str, dict[int, object]]]:
     """Snapshot user-added columns that are not in TASK_COLUMNS.
 
     Handles backward compatibility: old files may have fewer standard columns,
@@ -211,7 +211,7 @@ def _snapshot_extra_task_columns(
 
     if not file_extra_cols:
         empty_range = range(new_extra_start, new_extra_start)
-        return empty_range, {}, {}, {}
+        return empty_range, {}, {}
 
     # Remap file extra columns to sequential positions starting after TASK_COLUMNS
     remap: dict[int, int] = {}  # old_col -> new_col
@@ -222,15 +222,24 @@ def _snapshot_extra_task_columns(
     extra_headers = {remap[col]: worksheet.cell(row=1, column=col).value for col in file_extra_cols}
 
     extra_values_by_task_id: dict[str, dict[int, object]] = {}
-    extra_values_by_row: dict[int, dict[int, object]] = {}
     for row_index in range(2, worksheet.max_row + 1):
         values = {remap[col]: worksheet.cell(row=row_index, column=col).value for col in file_extra_cols}
         task_id = str(worksheet.cell(row=row_index, column=1).value or "").strip()
         if task_id and task_id not in extra_values_by_task_id:
             extra_values_by_task_id[task_id] = values
-        else:
-            extra_values_by_row[row_index] = values
-    return extra_columns, extra_headers, extra_values_by_task_id, extra_values_by_row
+            continue
+        # 无 ID 行：按收件人+主题做内容键登记（行号兜底在全空行删除后会错位，见 F13）。
+        # 保存时任务顺序未变（ID 修复不重排行序），同样的内容键可精确找回。
+        content_key = _extra_column_content_key(worksheet, row_index)
+        if content_key and content_key not in extra_values_by_task_id:
+            extra_values_by_task_id[content_key] = values
+    return extra_columns, extra_headers, extra_values_by_task_id
+
+
+def _extra_column_content_key(worksheet, row_index: int) -> str:
+    recipients = str(worksheet.cell(row=row_index, column=3).value or "").strip()
+    subject = str(worksheet.cell(row=row_index, column=5).value or "").strip()
+    return f"__row__{recipients}::{subject}" if recipients or subject else ""
 
 
 def _resize_task_sheet_rows(worksheet, target_row_count: int) -> None:
@@ -262,21 +271,21 @@ def _write_task_row(
 
 
 def _write_tasks_sheet(worksheet, tasks: list[MailTask]) -> None:
-    extra_columns, extra_headers, extra_values_by_task_id, extra_values_by_row = _snapshot_extra_task_columns(
-        worksheet
-    )
+    extra_columns, extra_headers, extra_values_by_task_id = _snapshot_extra_task_columns(worksheet)
     _resize_task_sheet_rows(worksheet, len(tasks) + 1)
     _write_task_header(worksheet, extra_headers)
     for row_index, task in enumerate(tasks, start=2):
         extra_values = extra_values_by_task_id.get(task.task_id)
         if extra_values is None:
-            # 刚被修复过 ID 的行在旧文件里没有可用键；导入修复随即写回时行序未变，按位置取回。
-            extra_values = extra_values_by_row.get(row_index, {})
+            # ID 缺失/重复被修复过的行：按内容键取回（与 snapshot 阶段的无ID行登记对应）。
+            # 修复 ID 不改收件人与主题，内容键在写回前后保持一致。
+            content_key = f"__row__{'; '.join(task.to_recipients)}::{task.subject.strip()}"
+            extra_values = extra_values_by_task_id.get(content_key)
         _write_task_row(
             worksheet,
             row_index=row_index,
             task=task,
-            extra_state=(extra_columns, extra_values),
+            extra_state=(extra_columns, extra_values or {}),
         )
 
 

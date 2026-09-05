@@ -176,13 +176,18 @@ class TaskRuntimeController:
                 cache_hit = cached is not None and cached[0] == signature
                 if not cache_hit:
                     unchecked_count += 1
+                    # 超出本轮限制：未校验的保持 UNCHECKED，已入队/发送中的保持现状态，
+                    # 其余非终态任务回退 UNCHECKED 等待下轮校验
                     if unchecked_count > max_validate:
-                        # 超出本轮限制，跳过（保持 UNCHECKED 状态）
-                        if state.status == TaskStatus.UNCHECKED:
+                        if (
+                            state.status is TaskStatus.UNCHECKED
+                            or state.status in TaskStatus.terminal_statuses()
+                            or task.task_id in self.sending_task_ids
+                            or task.task_id in self.drafting_task_ids
+                            or task.task_id in self.queued_task_ids
+                        ):
                             continue
-                        elif state.status not in TaskStatus.terminal_statuses() and task.task_id not in self.sending_task_ids and task.task_id not in self.drafting_task_ids and task.task_id not in self.queued_task_ids:
-                            state.status = TaskStatus.UNCHECKED
-                            continue
+                        state.status = TaskStatus.UNCHECKED
                         continue
             elif state.status == TaskStatus.UNCHECKED:
                 # 全量模式下也要识别未校验任务
@@ -220,6 +225,19 @@ class TaskRuntimeController:
         for task in tasks:
             self.drafting_task_ids.add(task.task_id)
             self._set_state(task, status=TaskStatus.DRAFTING, error_message="")
+
+    def clear_submission_marks(self, tasks: list[MailTask]) -> None:
+        """陈旧提交的结果被丢弃后，清理 sending/drafting 标记与残留的进行中状态。
+
+        旧 worker 已结束，若不清理，任务会永远卡在「发送中/保存草稿中」。
+        """
+        for task in tasks:
+            self.sending_task_ids.discard(task.task_id)
+            self.drafting_task_ids.discard(task.task_id)
+            state = self._states.get(task.task_id)
+            if state is not None and state.status in (TaskStatus.SENDING, TaskStatus.DRAFTING):
+                state.status = TaskStatus.UNCHECKED
+                state.error_message = ""
 
     def mark_send_worker_error(self, tasks: list[MailTask], error_text: str) -> None:
         for task in tasks:

@@ -233,6 +233,36 @@ class TaskPackageTests(unittest.TestCase):
         self.assertEqual("研发部", extra[1][1])
         self.assertNotEqual("t-1", extra[1][0])
 
+
+    def test_save_preserves_extra_columns_when_blank_row_shifts_row_numbers(self) -> None:
+        """全空行 + 无ID行组合：行号兜底会错位/丢值，内容键必须找回（F13 回归）。"""
+        headers = [
+            "任务ID", "是否启用", "收件人", "抄送人", "主题", "开头/补充内容",
+            "Markdown路径", "是否有附件", "附件路径", "是否定时发送", "定时发送时间", "备注",
+            "最近结果", "部门",
+        ]
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = TASKS_SHEET_NAME
+        sheet.append(headers)
+        sheet.append(["t-1", "是", "a@example.com", "", "主题1", "", "content/body.md", "否", "", "否", "", "", "", "市场部"])
+        sheet.append([None] * 14)  # 全空行：加载时跳过，写回时行号前移
+        sheet.append(["", "是", "b@example.com", "", "主题2", "", "content/body.md", "否", "", "否", "", "", "", "研发部"])
+        workbook.save(self.package_dir / TASKS_FILENAME)
+        workbook.close()
+        (self.package_dir / "content").mkdir(exist_ok=True)
+        (self.package_dir / "content" / "body.md").write_text("body", encoding="utf-8")
+
+        tasks = load_tasks_from_package(self.package_dir)
+        self.assertEqual(2, len(tasks))
+        ensure_unique_task_ids(tasks)
+        save_tasks_to_package(self.package_dir, tasks)
+
+        extra = self._read_extra_column()
+        self.assertEqual("市场部", extra[0][1])
+        self.assertEqual("研发部", extra[1][1])
+
+
     def test_failed_save_keeps_existing_tasks_file_intact(self) -> None:
         save_tasks_to_package(
             self.package_dir,

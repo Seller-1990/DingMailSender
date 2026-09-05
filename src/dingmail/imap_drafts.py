@@ -78,6 +78,30 @@ def _quote_mailbox(name: str) -> str:
     return f'"{escaped}"'
 
 
+class _MaxLineGuard:
+    """imaplib._MAXLINE 的会话级放大/恢复；集中管理避免散落多处。
+
+    某些服务商的长 LIST 响应超过默认 10_000 行限制；会话期间放大到 1M。
+    """
+
+    _LIMIT = 1_000_000
+
+    def __init__(self) -> None:
+        self._original: int = imaplib._MAXLINE  # type: ignore[attr-defined]
+        self._active = False
+
+    def enlarge(self) -> None:
+        if not self._active:
+            self._original = imaplib._MAXLINE  # type: ignore[attr-defined]
+            imaplib._MAXLINE = max(imaplib._MAXLINE, self._LIMIT)  # type: ignore[attr-defined]
+            self._active = True
+
+    def restore(self) -> None:
+        if self._active:
+            imaplib._MAXLINE = self._original  # type: ignore[attr-defined]
+            self._active = False
+
+
 class ImapDraftsSession:
     def __init__(self, host: str, port: int, username: str, password: str, timeout_seconds: int = 30) -> None:
         self._host = host
@@ -87,11 +111,10 @@ class ImapDraftsSession:
         self._timeout_seconds = timeout_seconds
         self._imap: imaplib.IMAP4_SSL | None = None
         self._drafts_mailbox: str | None = None
-        self._original_maxline: int = imaplib._MAXLINE  # type: ignore[attr-defined]
+        self._maxline_guard = _MaxLineGuard()
 
     def __enter__(self) -> "ImapDraftsSession":
-        self._original_maxline = imaplib._MAXLINE  # type: ignore[attr-defined]
-        imaplib._MAXLINE = max(imaplib._MAXLINE, 1_000_000)  # type: ignore[attr-defined]
+        self._maxline_guard.enlarge()
         ctx = ssl.create_default_context()
         session = imaplib.IMAP4_SSL(self._host, self._port, ssl_context=ctx, timeout=self._timeout_seconds)
         try:
@@ -99,7 +122,7 @@ class ImapDraftsSession:
             self._imap = session
             self._drafts_mailbox = self._discover_drafts_mailbox()
         except BaseException:
-            imaplib._MAXLINE = self._original_maxline  # type: ignore[attr-defined]
+            self._maxline_guard.restore()
             self._imap = None
             self._drafts_mailbox = None
             try:
@@ -120,7 +143,7 @@ class ImapDraftsSession:
         except Exception:
             pass
         self._imap = None
-        imaplib._MAXLINE = self._original_maxline  # type: ignore[attr-defined]
+        self._maxline_guard.restore()
 
     def reconnect(self) -> None:
         """关闭当前连接并重新建立 IMAP 会话。用于 session error 后的恢复。"""
@@ -130,7 +153,7 @@ class ImapDraftsSession:
             except Exception:
                 pass
             self._imap = None
-        imaplib._MAXLINE = self._original_maxline  # type: ignore[attr-defined]
+        self._maxline_guard.restore()
         # 重新执行连接逻辑
         self.__enter__()
 
@@ -138,7 +161,10 @@ class ImapDraftsSession:
         if self._imap is None:
             raise RuntimeError("IMAP 会话未建立")
 
-        mailbox = self._drafts_mailbox or self._create_or_pick_fallback_mailbox()
+        if self._drafts_mailbox is None:
+            # 回退探测 ≈6 RTT；结果缓存后整个会话只做一次
+            self._drafts_mailbox = self._create_or_pick_fallback_mailbox()
+        mailbox = self._drafts_mailbox
         payload = msg.as_bytes()
         internal_date = imaplib.Time2Internaldate(time.time())
         status, data = self._imap.append(_quote_mailbox(mailbox), "\\Draft", internal_date, payload)

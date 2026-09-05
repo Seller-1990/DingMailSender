@@ -15,6 +15,7 @@ from .rendering import (
     rewrite_local_images_for_preview,
     wrap_email_html,
 )
+from .run_store import debug_artifacts_enabled
 from .task_models import MailTask
 from .task_package import resolve_user_path
 
@@ -125,7 +126,12 @@ def render_task_email(task: MailTask, package_dir: Path) -> RenderedTaskEmail:
     asset_errors = _validate_task_assets(task, package_dir, html, markdown_parent)
     if asset_errors:
         raise ValueError("；".join(asset_errors))
-    html_for_preview = rewrite_local_images_for_preview(html, markdown_parent, containment_root=package_dir)
+    # 预览 HTML 只在调试产物开启时计算（BS4 解析是每封邮件的主要 CPU 开销）
+    html_for_preview = (
+        rewrite_local_images_for_preview(html, markdown_parent, containment_root=package_dir)
+        if debug_artifacts_enabled()
+        else ""
+    )
     html_for_email, inline_images = embed_cid_images(html, markdown_parent, containment_root=package_dir)
     attachments = _resolve_attachments(task, package_dir)
 

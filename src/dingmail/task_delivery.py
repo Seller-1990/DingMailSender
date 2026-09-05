@@ -358,6 +358,65 @@ def _send_single_task(
     return outcome, session_error
 
 
+def _run_delivery_loop(
+    *,
+    config: SendTasksConfig | DraftsConfig,
+    run_paths: RunPaths,
+    logger: logging.Logger,
+    session: object,
+    handle_one: Callable[[DeliveryTaskContext], tuple[TaskDeliveryOutcome, Exception | None]],
+    skipped_status: DeliveryStatus,
+    log_prefix: str,
+    progress_callback: Callable[[int, int], None] | None,
+    cancel_check: Callable[[], bool] | None,
+) -> list[TaskDeliveryOutcome]:
+    """send/drafts 共用的任务循环：取消、单任务处理、重连一次、限速。
+
+    两个投递通道的行为契约完全一致，唯一差异是通道对象与单任务处理器。
+    """
+    outcomes: list[TaskDeliveryOutcome] = []
+    total = len(config.tasks)
+    for index, task in enumerate(config.tasks, start=1):
+        if cancel_check and cancel_check():
+            outcomes.extend(
+                _skip_remaining_tasks(
+                    tasks=config.tasks[index - 1:],
+                    start_idx=index,
+                    status=skipped_status,
+                    reason="用户取消",
+                    manifest_csv=run_paths.manifest_csv,
+                    logger=logger,
+                )
+            )
+            break
+        outcome, session_error = handle_one(
+            DeliveryTaskContext(run_paths=run_paths, logger=logger, index=index, task=task)
+        )
+        outcomes.append(outcome)
+        if progress_callback:
+            progress_callback(index, total)
+        if session_error is not None:
+            # 尝试重连一次，成功则继续剩余任务
+            try:
+                session.reconnect()
+                logger.info("%s_reconnect_ok after session_error: %s", log_prefix, redact_text(str(session_error)))
+            except Exception as reconnect_exc:
+                logger.error("%s_reconnect_failed: %s", log_prefix, redact_text(str(reconnect_exc)))
+                outcomes.extend(
+                    _skip_remaining_tasks(
+                        tasks=config.tasks[index:],
+                        start_idx=index + 1,
+                        status=skipped_status,
+                        reason=str(session_error),
+                        manifest_csv=run_paths.manifest_csv,
+                        logger=logger,
+                    )
+                )
+                break
+        _sleep_between_tasks(index, total, config.rate_limit_seconds, cancel_check)
+    return outcomes
+
+
 def send_tasks(
     config: SendTasksConfig,
     *,
@@ -368,50 +427,19 @@ def send_tasks(
     logger = _build_logger(run_paths.logs_dir / "send.log", f"dingmail.send.{run_paths.run_dir.name}")
     _snapshot_package_files(config.package_dir, run_paths)
 
-    outcomes: list[TaskDeliveryOutcome] = []
-    total = len(config.tasks)
     try:
         with SmtpSession(_smtp_config_from_delivery(config), config.smtp_password) as smtp:
-            for index, task in enumerate(config.tasks, start=1):
-                if cancel_check and cancel_check():
-                    outcomes.extend(
-                        _skip_remaining_tasks(
-                            tasks=config.tasks[index - 1:],
-                            start_idx=index,
-                            status=DeliveryStatus.SEND_SKIPPED,
-                            reason="用户取消",
-                            manifest_csv=run_paths.manifest_csv,
-                            logger=logger,
-                        )
-                    )
-                    break
-                outcome, session_error = _send_single_task(
-                    smtp=smtp,
-                    config=config,
-                    context=DeliveryTaskContext(run_paths=run_paths, logger=logger, index=index, task=task),
-                )
-                outcomes.append(outcome)
-                if progress_callback:
-                    progress_callback(index, total)
-                if session_error is not None:
-                    # 尝试重连一次，成功则继续剩余任务
-                    try:
-                        smtp.reconnect()
-                        logger.info("reconnect_ok after session_error: %s", redact_text(str(session_error)))
-                    except Exception as reconnect_exc:
-                        logger.error("reconnect_failed: %s", redact_text(str(reconnect_exc)))
-                        outcomes.extend(
-                            _skip_remaining_tasks(
-                                tasks=config.tasks[index:],
-                                start_idx=index + 1,
-                                status=DeliveryStatus.SEND_SKIPPED,
-                                reason=str(session_error),
-                                manifest_csv=run_paths.manifest_csv,
-                                logger=logger,
-                            )
-                        )
-                        break
-                _sleep_between_tasks(index, total, config.rate_limit_seconds, cancel_check)
+            outcomes = _run_delivery_loop(
+                config=config,
+                run_paths=run_paths,
+                logger=logger,
+                session=smtp,
+                handle_one=lambda context: _send_single_task(smtp=smtp, config=config, context=context),
+                skipped_status=DeliveryStatus.SEND_SKIPPED,
+                log_prefix="reconnect",
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
         return SendTasksResult(run_paths=run_paths, outcomes=outcomes)
     finally:
         _close_logger(logger)
@@ -476,8 +504,6 @@ def save_tasks_to_imap_drafts(
     logger = _build_logger(run_paths.logs_dir / "drafts.log", f"dingmail.drafts.{run_paths.run_dir.name}")
     _snapshot_package_files(config.package_dir, run_paths)
 
-    outcomes: list[TaskDeliveryOutcome] = []
-    total = len(config.tasks)
     try:
         with ImapDraftsSession(
             host=config.imap_host,
@@ -485,46 +511,17 @@ def save_tasks_to_imap_drafts(
             username=config.imap_username,
             password=config.imap_password,
         ) as drafts:
-            for index, task in enumerate(config.tasks, start=1):
-                if cancel_check and cancel_check():
-                    outcomes.extend(
-                        _skip_remaining_tasks(
-                            tasks=config.tasks[index - 1:],
-                            start_idx=index,
-                            status=DeliveryStatus.DRAFT_SKIPPED,
-                            reason="用户取消",
-                            manifest_csv=run_paths.manifest_csv,
-                            logger=logger,
-                        )
-                    )
-                    break
-                outcome, session_error = _save_single_draft(
-                    drafts=drafts,
-                    config=config,
-                    context=DeliveryTaskContext(run_paths=run_paths, logger=logger, index=index, task=task),
-                )
-                outcomes.append(outcome)
-                if progress_callback:
-                    progress_callback(index, total)
-                if session_error is not None:
-                    # 尝试重连一次，成功则继续剩余任务
-                    try:
-                        drafts.reconnect()
-                        logger.info("imap_reconnect_ok after session_error: %s", redact_text(str(session_error)))
-                    except Exception as reconnect_exc:
-                        logger.error("imap_reconnect_failed: %s", redact_text(str(reconnect_exc)))
-                        outcomes.extend(
-                            _skip_remaining_tasks(
-                                tasks=config.tasks[index:],
-                                start_idx=index + 1,
-                                status=DeliveryStatus.DRAFT_SKIPPED,
-                                reason=str(session_error),
-                                manifest_csv=run_paths.manifest_csv,
-                                logger=logger,
-                            )
-                        )
-                        break
-                _sleep_between_tasks(index, total, config.rate_limit_seconds, cancel_check)
+            outcomes = _run_delivery_loop(
+                config=config,
+                run_paths=run_paths,
+                logger=logger,
+                session=drafts,
+                handle_one=lambda context: _save_single_draft(drafts=drafts, config=config, context=context),
+                skipped_status=DeliveryStatus.DRAFT_SKIPPED,
+                log_prefix="imap_reconnect",
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
         return SendTasksResult(run_paths=run_paths, outcomes=outcomes)
     finally:
         _close_logger(logger)
